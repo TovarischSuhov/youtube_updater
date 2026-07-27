@@ -1,0 +1,146 @@
+Imports:
+  - Types:
+      - LoadConfig
+      - AddMapping
+      - SaveConfig
+      - RemoveMapping
+    From: config
+  - Types:
+      - State
+    From: state
+  - Types:
+      - YouTube
+    From: youtube
+  - Types:
+      - SyncAll
+      - ChannelResult
+    From: syncer
+
+Annotations: |
+  This cell is the CLI entry and composition root: it configures logging,
+  bootstraps the config on first run, parses flags, wires the facade, state, and
+  orchestrator, runs one sync pass, persists state, and logs results.
+
+  Return errors following the (result, error) idiom.
+
+---
+
+"Run(configPath: string, secretsPath: string, tokenPath: string, statePath: string, redirectURL: string, dryRun: bool) -> err:error":
+  location: main.go
+  annotations: |
+    Execute one sync pass end to end.
+
+    `configPath`: path to the channel→playlist config
+    `secretsPath`: path to client_secrets.json
+    `tokenPath`: path to the cached OAuth token
+    `statePath`: path to the state file
+    `redirectURL`: loopback redirect URL for consent
+    `dryRun`: if true, detect only
+    `err`: error on fatal failure
+
+    Algorithm:
+    1. Parse command-line flags into the parameters above
+    2. Load the channel→playlist mappings via `LoadConfig`(`configPath`)
+    3. Construct `YouTube`(`secretsPath`, `tokenPath`, `redirectURL`)
+    4. Construct `State`(`statePath`)
+    5. Run `SyncAll` with the facade, state, the loaded mappings, and `dryRun`, collecting the outcomes
+    6. Unless `dryRun`, save state
+    7. Log each `ChannelResult` among the outcomes
+    8. Return `err` on fatal failure
+
+    Requirements:
+    - A main entry point parses flags, calls Run, and maps `err` to a non-zero exit code
+
+"RunAdd(configPath: string, secretsPath: string, tokenPath: string, redirectURL: string, channelID: string, playlistID: string) -> err:error":
+  location: main.go
+  annotations: |
+    Add or update a channel→playlist pair: fetch names, upsert, persist.
+
+    `configPath`: path to the config file
+    `secretsPath`: path to client_secrets.json
+    `tokenPath`: path to the cached OAuth token
+    `redirectURL`: loopback redirect URL for consent
+    `channelID`: the channel identifier to add
+    `playlistID`: the target playlist identifier
+    `err`: error on failure
+
+    Algorithm:
+    1. Load current mappings via `LoadConfig`
+    2. Construct `YouTube` and resolve the channel and playlist names
+    3. Upsert via `AddMapping`
+    4. Persist via `SaveConfig`
+
+    Requirements:
+    - Requires OAuth to fetch names; fails if the channel or playlist is not found
+
+"RunRemove(configPath: string, channelID: string) -> err:error":
+  location: main.go
+  annotations: |
+    Remove a channel→playlist pair by channel identifier and persist.
+
+    `configPath`: path to the config file
+    `channelID`: the channel identifier to remove
+    `err`: error on failure
+
+    Algorithm:
+    1. Load current mappings via `LoadConfig`
+    2. Remove via `RemoveMapping`
+    3. Persist via `SaveConfig`
+
+    Requirements:
+    - Offline (no auth); no-op if the channel is absent
+
+"RunList(configPath: string) -> err:error":
+  location: main.go
+  annotations: |
+    Print all configured channel→playlist pairs with their names.
+
+    `configPath`: path to the config file
+    `err`: error if the config cannot be read
+
+    Algorithm:
+    1. Load current mappings via `LoadConfig`
+    2. Print each pair: channel identifier and name, then playlist identifier and name
+
+    Requirements:
+    - Offline (no auth)
+
+"SetupLogging(level: string) -> err:error":
+  location: main.go
+  annotations: |
+    Configure the process logger at the given severity.
+
+    `level`: one of debug, info, warn, error (case-insensitive)
+    `err`: error if `level` is not recognized
+
+    Algorithm:
+    1. Map `level` to a severity
+    2. Install a text handler on stderr at that severity as the default logger
+
+    Requirements:
+    - Accepted levels: debug, info, warn, error (case-insensitive); anything else returns `err`
+
+"EnsureConfig(configPath: string) -> created:bool, err:error":
+  location: main.go
+  annotations: |
+    Ensure a config file exists, creating an empty default on first run.
+
+    `configPath`: path to the config file
+    `created`: true if an empty config was written (first run)
+    `err`: error if writing fails
+
+    Algorithm:
+    1. If `configPath` already exists, return created=false
+    2. Otherwise write an empty default via `SaveConfig` and log a first-run notice
+    3. Return created=true
+
+    Requirements:
+    - Idempotent: a no-op when the config already exists
+    - The empty default is valid YAML readable by `LoadConfig`
+
+---
+
+Author: Goga
+CreatedAt: 27/07/26
+Description: |
+  CLI entry and composition root wiring config, facade, state, and orchestrator.

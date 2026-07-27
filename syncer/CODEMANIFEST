@@ -1,0 +1,78 @@
+Imports:
+  - Types:
+      - ChannelMapping
+    From: config
+  - Types:
+      - State
+    From: state
+  - Types:
+      - YouTube
+      - Video
+    From: youtube
+
+Annotations: |
+  This cell orchestrates the per-channel sync: seed on first contact (add nothing),
+  otherwise add only videos newer than the channel's watermark.
+
+  Return errors following the (result, error) idiom.
+
+---
+
+"ChannelResult()":
+  location: syncer.go
+  annotations: |
+    Outcome of syncing one channel, for logging.
+  properties:
+    "ChannelID -> string": |
+      The channel identifier.
+    "PlaylistID -> string": |
+      The target playlist identifier.
+    "Seeded -> bool": |
+      True if this run only seeded the channel and added nothing.
+    "NewCount -> int": |
+      Number of new videos detected for the channel.
+    "AddedIDs -> []string": |
+      Identifiers of videos inserted this run.
+    "Err -> error": |
+      Error encountered for this channel, if any.
+
+"SyncAll(youTube: YouTube, state: State, mappings: []ChannelMapping, dryRun: bool) -> results:[]ChannelResult, err:error":
+  location: syncer.go
+  annotations: |
+    Sync every configured channel against its watermark.
+
+    `youTube`: the YouTube facade
+    `state`: the persisted cursor store
+    `mappings`: the channel→playlist mappings
+    `dryRun`: if true, detect only — perform no inserts and mutate no state
+    `results`: one `ChannelResult` per mapping
+    `err`: error on fatal failure
+
+    Algorithm:
+    1. For each `ChannelMapping` in `mappings`:
+       1. Resolve the channel's uploads playlist via `YouTube`
+       2. Enumerate uploads (newest first) as `Video` items via `YouTube`
+       3. If the enumerated list is empty, record a `ChannelResult` with NewCount 0
+          and continue to the next mapping without setting a cursor
+       4. If the channel is not seeded in `State`:
+          - build a `ChannelResult` marked seeded with NewCount 0
+          - unless `dryRun`, set the channel's last-seen cursor to the newest `Video`
+       5. Else:
+          - read the watermark from `State`
+          - select `Video` items whose PublishedAt is greater than the watermark
+          - unless `dryRun`, insert each into the playlist via `YouTube`, oldest
+            first, then set the channel's last-seen cursor to the newest `Video`
+          - build a `ChannelResult` with NewCount and the added identifiers
+    2. Return `results`
+
+    Constraints:
+    - When `dryRun`, perform no inserts and call no state-mutating operation
+    - Never insert a `Video` whose PublishedAt is not greater than the watermark
+    - A channel whose uploads list is empty is skipped: no cursor is set, no videos are added
+
+---
+
+Author: Goga
+CreatedAt: 27/07/26
+Description: |
+  Per-channel sync orchestration with watermark-based new-video detection.

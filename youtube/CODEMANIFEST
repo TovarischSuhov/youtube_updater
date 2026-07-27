@@ -1,0 +1,94 @@
+Usages:
+  youtube-data-api: .goga/usages/cooks/youtube-data-api.md
+  google-oauth2: .goga/usages/cooks/google-oauth2.md
+
+Annotations: |
+  This cell is the Google integration facade: it owns OAuth2 credentials and all
+  YouTube Data API v3 calls, hiding pointer and HTTP types behind a string-based
+  contract.
+
+  Use `google-oauth2` to obtain the authenticated client and to cache and refresh
+  the token during construction.
+  Use `youtube-data-api` for every API call.
+  Return errors following the (result, error) idiom.
+
+---
+
+"Video()":
+  location: youtube.go
+  annotations: |
+    A YouTube video as relevant to sync: its identifier and publish time.
+  properties:
+    "ID -> string": |
+      The video identifier.
+    "PublishedAt -> string": |
+      RFC 3339 publish timestamp; used as the new-video watermark.
+
+"YouTube(secretsPath: string, tokenPath: string, redirectURL: string)":
+  location: youtube.go
+  annotations: |
+    Facade over Google credentials and the YouTube Data API v3.
+
+    `secretsPath`: path to client_secrets.json (Desktop OAuth client)
+    `tokenPath`: path to the cached token file
+    `redirectURL`: loopback redirect URL for the consent callback
+
+    Algorithm:
+    1. On construction, obtain an authenticated HTTP client via `google-oauth2`
+       (use the cached token at `tokenPath` if valid, otherwise run the consent
+       flow and persist the token)
+    2. Build the YouTube service client
+
+    Requirements:
+    - The constructed facade is safe for sequential use across one sync pass
+  methods:
+    "ResolveUploads(channelID: string) -> uploadsPlaylistID:string, err:error": |
+      Resolve a channel's uploads playlist identifier.
+
+      `channelID`: the UC… channel identifier
+      `uploadsPlaylistID`: the uploads playlist identifier
+      `err`: error if the channel is not found or the call fails
+
+      Use `youtube-data-api` (channels.list, contentDetails) to read the uploads
+      playlist id.
+    "ListUploads(uploadsPlaylistID: string) -> videos:[]Video, err:error": |
+      Enumerate a channel's uploads, newest first.
+
+      `uploadsPlaylistID`: the uploads playlist identifier
+      `videos`: uploaded `Video` items, newest first
+      `err`: error if enumeration fails
+
+      Use `youtube-data-api` (playlistItems.list, paginated) to collect items.
+    "AddToPlaylist(playlistID: string, videoID: string) -> itemID:string, err:error": |
+      Insert a video into a playlist.
+
+      `playlistID`: the target playlist identifier
+      `videoID`: the video to add
+      `itemID`: the created playlist-item identifier
+      `err`: error if the insert fails
+
+      Use `youtube-data-api` (playlistItems.insert) to add the video.
+
+      Constraints:
+      - Do not deduplicate; the caller guarantees the video was not added before
+    "ResolveNames(channelID: string, playlistID: string) -> channelName:string, playlistName:string, err:error": |
+      Resolve the human-readable channel name and playlist title.
+
+      `channelID`: the UC… channel identifier
+      `playlistID`: the PL… playlist identifier
+      `channelName`: the channel display name
+      `playlistName`: the playlist title
+      `err`: error if either cannot be resolved
+
+      Use `youtube-data-api` (channels.list snippet.title, playlists.list
+      snippet.title) to read both titles.
+
+      Requirements:
+      - The playlist must be public or owned by the user, otherwise `err`
+
+---
+
+Author: Goga
+CreatedAt: 27/07/26
+Description: |
+  Google integration facade: OAuth2 credentials and YouTube Data API v3 access.

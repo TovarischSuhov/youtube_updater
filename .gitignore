@@ -1,0 +1,10 @@
+# Secrets & runtime state — never commit
+client_secrets.json
+token.json
+state.json
+
+# Built binary
+/youtube-updater
+
+# Go
+/vendor/

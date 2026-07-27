@@ -1,0 +1,74 @@
+Usages:
+  json: |
+    Persist state with encoding/json. Write atomically by creating a temporary file
+    in the same directory and renaming it over the target path.
+
+Annotations: |
+  This cell owns the persisted per-channel "last seen video" cursor store.
+
+  Use `json` to load and save the state file.
+  Return errors following the (result, error) idiom.
+
+---
+
+"State(path: string)":
+  location: state.go
+  annotations: |
+    Persisted per-channel "last seen video" cursor. The sole source of truth for
+    which videos have been processed.
+
+    `path`: path to the state file
+
+    Algorithm:
+    1. On construction, read `path` with `json`; if absent or empty, start empty
+    2. Expose per-channel cursor getters and a setter
+    3. Save persists the cursors atomically
+
+    Requirements:
+    - A missing or empty state file is not an error; the store starts empty
+  properties:
+    "Path -> string": |
+      Path to the state file.
+  methods:
+    "IsSeeded(channelID: string) -> seeded:bool": |
+      Whether a first contact has ever been recorded for the channel.
+
+      `channelID`: the channel identifier
+      `seeded`: true if a cursor has been set for this channel
+    "LastSeenID(channelID: string) -> videoID:string": |
+      The identifier of the last seen video for the channel.
+
+      `channelID`: the channel identifier
+      `videoID`: the last seen video identifier, empty if the channel is unseeded
+    "LastSeenAt(channelID: string) -> publishedAt:string": |
+      The publish-time watermark for the channel.
+
+      `channelID`: the channel identifier
+      `publishedAt`: RFC 3339 timestamp of the last seen video, empty if unseeded
+    "SetLastSeen(channelID: string, videoID: string, publishedAt: string) -> err:error": |
+      Record the last seen video for a channel and mark it seeded.
+
+      `channelID`: the channel identifier
+      `videoID`: the last seen video identifier
+      `publishedAt`: RFC 3339 timestamp of that video
+      `err`: error if the timestamp is empty or malformed
+
+      Algorithm:
+      1. Store `videoID` and `publishedAt` for `channelID`
+      2. Mark the channel seeded
+    "Save() -> err:error": |
+      Persist all cursors to the state file atomically.
+
+      `err`: error if writing fails
+
+      Use `json` for serialization.
+
+      Requirements:
+      - The write is atomic: readers and crash recovery never observe a partially-written file
+
+---
+
+Author: Goga
+CreatedAt: 27/07/26
+Description: |
+  Persisted per-channel "last seen video" cursor store.

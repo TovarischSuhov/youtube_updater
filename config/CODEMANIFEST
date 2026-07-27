@@ -1,0 +1,106 @@
+Usages:
+  yaml: |
+    Parse and emit the channel→playlist config with gopkg.in/yaml.v3. The file is a
+    top-level "channels:" list whose items carry channel_id, playlist_id,
+    channel_name, and playlist_name. Emit writes the list back in the same shape.
+
+Annotations: |
+  This cell owns the configuration data model, its YAML parsing, and its
+  mutation and persistence.
+
+  Use `yaml` to read and write the config file.
+  Return errors following the (result, error) idiom.
+  Upsert and remove are idempotent: re-adding a channel updates it; removing an
+  absent channel is a no-op.
+
+---
+
+"ChannelMapping()":
+  location: config.go
+  annotations: |
+    One monitored channel and the target playlist its new uploads are added to,
+    with human-readable names.
+  properties:
+    "ChannelID -> string": |
+      The monitored channel identifier (UC…).
+    "PlaylistID -> string": |
+      The target playlist identifier (PL…) where new uploads are added.
+    "ChannelName -> string": |
+      The channel display name; empty for pairs created before names were tracked.
+    "PlaylistName -> string": |
+      The playlist title; empty for pairs created before names were tracked.
+
+"LoadConfig(path: string) -> mappings:[]ChannelMapping, err:error":
+  location: config.go
+  annotations: |
+    Parse the YAML channel→playlist mapping file into a list of `ChannelMapping`.
+
+    `path`: path to the config file
+    `mappings`: the parsed channel→playlist mappings
+    `err`: error if the file cannot be read or parsed
+
+    Algorithm:
+    1. Read the file at `path`
+    2. Unmarshal it with `yaml` into a list of `ChannelMapping`
+    3. Return `mappings`, or `err` on read or parse failure
+
+    Requirements:
+    - An empty file yields an empty list, not an error
+
+"SaveConfig(path: string, mappings: []ChannelMapping) -> err:error":
+  location: config.go
+  annotations: |
+    Write the channel→playlist mappings to the config file as YAML.
+
+    `path`: path to the config file
+    `mappings`: the mappings to persist
+    `err`: error if the file cannot be written
+
+    Algorithm:
+    1. Marshal `mappings` with `yaml` into the top-level channels shape
+    2. Write atomically so readers never observe a partial file
+
+    Requirements:
+    - The written file is valid YAML readable by `LoadConfig`
+
+"AddMapping(mappings: []ChannelMapping, channelID: string, playlistID: string, channelName: string, playlistName: string) -> updated:[]ChannelMapping":
+  location: config.go
+  annotations: |
+    Upsert a channel→playlist pair with names into the list.
+
+    `mappings`: the current mappings
+    `channelID`: the channel identifier
+    `playlistID`: the target playlist identifier
+    `channelName`: the channel display name
+    `playlistName`: the playlist title
+    `updated`: the updated list
+
+    Algorithm:
+    1. If `channelID` already exists, update its playlist and names in place
+    2. Otherwise append a new `ChannelMapping`
+
+    Requirements:
+    - Idempotent: re-adding a channel updates rather than duplicates
+
+"RemoveMapping(mappings: []ChannelMapping, channelID: string) -> updated:[]ChannelMapping":
+  location: config.go
+  annotations: |
+    Remove the pair for a channel from the list.
+
+    `mappings`: the current mappings
+    `channelID`: the channel identifier to remove
+    `updated`: the list without that channel
+
+    Algorithm:
+    1. Drop any `ChannelMapping` whose channel identifier equals `channelID`
+
+    Requirements:
+    - Idempotent: removing an absent channel is a no-op with no error
+
+---
+
+Author: Goga
+CreatedAt: 27/07/26
+Description: |
+  Configuration data model, YAML loader, and mutation and persistence for the
+  channel→playlist mapping.
