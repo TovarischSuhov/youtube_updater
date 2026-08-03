@@ -10,6 +10,8 @@ Imports:
     From: state
   - Types:
       - YouTube
+      - ParsePlaylistID
+      - ParseChannelRef
     From: youtube
   - Types:
       - SyncAll
@@ -51,44 +53,55 @@ Annotations: |
     Requirements:
     - A main entry point parses flags, calls Run, and maps `err` to a non-zero exit code
 
-"RunAdd(configPath: string, secretsPath: string, tokenPath: string, redirectURL: string, channelID: string, playlistID: string) -> err:error":
+"RunAdd(configPath: string, secretsPath: string, tokenPath: string, redirectURL: string, channelInput: string, playlistInput: string) -> err:error":
   location: main.go
   annotations: |
-    Add or update a channel→playlist pair: fetch names, upsert, persist.
+    Add or update a channel→playlist pair from a bare ID or a YouTube URL.
 
     `configPath`: path to the config file
     `secretsPath`: path to client_secrets.json
     `tokenPath`: path to the cached OAuth token
     `redirectURL`: loopback redirect URL for consent
-    `channelID`: the channel identifier to add
-    `playlistID`: the target playlist identifier
+    `channelInput`: a channel ID or a YouTube channel/@handle/c/user URL
+    `playlistInput`: a playlist ID or a YouTube URL with a ?list= parameter
     `err`: error on failure
 
     Algorithm:
     1. Load current mappings via `LoadConfig`
-    2. Construct `YouTube` and resolve the channel and playlist names
-    3. Upsert via `AddMapping`
+    2. Parse the playlist via `ParsePlaylistID` (`playlistInput`)
+    3. Construct `YouTube`
+    4. Parse the channel via `ParseChannelRef` (`channelInput`); resolve it through
+       the facade (bare IDs and /channel/ URLs need no API call; @handle, /c/,
+       /user/ slugs are resolved through channels.list)
+    5. Resolve the channel and playlist names through the facade
+    6. Upsert via `AddMapping`
+    7. Persist via `SaveConfig`
+
+    Requirements:
+    - Requires OAuth to resolve handles and fetch names; fails if the channel or
+      playlist cannot be resolved
+
+"RunRemove(configPath: string, channelInput: string) -> err:error":
+  location: main.go
+  annotations: |
+    Remove a channel→playlist pair and persist. Accepts a bare channel ID or a
+    /channel/UC… URL; handle/custom/user URLs are rejected (they need the API).
+
+    `configPath`: path to the config file
+    `channelInput`: a channel ID or a /channel/UC… URL
+    `err`: error on failure
+
+    Algorithm:
+    1. If `channelInput` is a YouTube URL, parse it via `ParseChannelRef` and
+       require an ID reference; otherwise use the bare token as-is
+    2. Load current mappings via `LoadConfig`
+    3. Remove via `RemoveMapping`
     4. Persist via `SaveConfig`
 
     Requirements:
-    - Requires OAuth to fetch names; fails if the channel or playlist is not found
-
-"RunRemove(configPath: string, channelID: string) -> err:error":
-  location: main.go
-  annotations: |
-    Remove a channel→playlist pair by channel identifier and persist.
-
-    `configPath`: path to the config file
-    `channelID`: the channel identifier to remove
-    `err`: error on failure
-
-    Algorithm:
-    1. Load current mappings via `LoadConfig`
-    2. Remove via `RemoveMapping`
-    3. Persist via `SaveConfig`
-
-    Requirements:
     - Offline (no auth); no-op if the channel is absent
+    - Rejects handle/custom/user URLs; advise using the list command to find the
+      channel ID
 
 "RunList(configPath: string) -> err:error":
   location: main.go
