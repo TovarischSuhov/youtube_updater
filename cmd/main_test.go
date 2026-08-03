@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"youtube-updater/config"
+	"youtube-updater/state"
 )
 
 // TestContractSurface is a compile-time check of the public API shape.
@@ -20,6 +21,7 @@ func TestContractSurface(t *testing.T) {
 	var _ func(string, string, string, string, string, string) error = RunAdd
 	var _ func(string, string) error = RunRemove
 	var _ func(string) error = RunList
+	var _ func(string, string) error = RunStatus
 }
 
 func TestSetupLogging_AcceptsKnownLevels(t *testing.T) {
@@ -191,6 +193,57 @@ func TestRunRemove_RejectsHandleURL(t *testing.T) {
 	got, _ := config.LoadConfig(path)
 	if len(got) != 1 {
 		t.Fatalf("config should be unchanged after a rejected remove, got %+v", got)
+	}
+}
+
+func TestRunStatus_PrintsSeededAndUnseeded(t *testing.T) {
+	configPath := writeConfig(t, []config.ChannelMapping{
+		{ChannelID: "UCa", ChannelName: "Foo", PlaylistID: "PLa", PlaylistName: "Bar"},
+		{ChannelID: "UCb", ChannelName: "Baz", PlaylistID: "PLb", PlaylistName: "Qux"},
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, err := state.NewState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetLastSeen("UCa", "vid1", "2026-08-01T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := RunStatus(configPath, statePath); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// Seeded channel: names, IDs, seeded flag, last-seen video id + publish time.
+	for _, want := range []string{"Foo", "UCa", "Bar", "seeded:", "true", "vid1", "2026-08-01T12:00:00Z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output missing %q:\n%s", want, out)
+		}
+	}
+	// Unseeded channel: flagged as not synced.
+	for _, want := range []string{"Baz", "UCb", "false", "not synced yet"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunStatus_MissingState_AllUnseeded(t *testing.T) {
+	configPath := writeConfig(t, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}})
+	statePath := filepath.Join(t.TempDir(), "does-not-exist.json")
+	out := captureStdout(t, func() {
+		if err := RunStatus(configPath, statePath); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "not synced yet") {
+		t.Errorf("missing state should read as unseeded; got:\n%s", out)
+	}
+	if strings.Contains(out, "true") {
+		t.Errorf("missing state should have no seeded channels; got:\n%s", out)
 	}
 }
 

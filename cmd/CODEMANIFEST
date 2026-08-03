@@ -118,6 +118,25 @@ Annotations: |
     Requirements:
     - Offline (no auth)
 
+"RunStatus(configPath: string, statePath: string) -> err:error":
+  location: main.go
+  annotations: |
+    Print the sync state of every configured channel. Offline.
+
+    `configPath`: path to the config file
+    `statePath`: path to the state file
+    `err`: error if the config or state cannot be read
+
+    Algorithm:
+    1. Load current mappings via `LoadConfig`
+    2. Load the state store from `statePath`
+    3. For each mapping, print channel and playlist names + IDs, then the seeded
+       flag, the last sync time, and the last-seen video (id + publish time)
+    4. Unseeded channels print "not synced yet"
+
+    Requirements:
+    - Offline (no auth); a missing or empty state file reads as all unseeded
+
 "SetupLogging(level: string) -> err:error":
   location: main.go
   annotations: |

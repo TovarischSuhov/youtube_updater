@@ -185,9 +185,48 @@ func RunList(configPath string) error {
 	return nil
 }
 
+// RunStatus prints the sync state of every configured channel: names and IDs,
+// whether the channel is seeded, the last sync time, and the last-seen video.
+// Offline — reads config and state only; a missing state file reads as every
+// channel unseeded (no error).
+func RunStatus(configPath, statePath string) error {
+	mappings, err := config.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	st, err := state.NewState(statePath)
+	if err != nil {
+		return fmt.Errorf("state: %w", err)
+	}
+	for i, m := range mappings {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("%s (%s) → %s (%s)\n",
+			nameOrUnnamed(m.ChannelName), m.ChannelID,
+			nameOrUnnamed(m.PlaylistName), m.PlaylistID)
+		seeded := st.IsSeeded(m.ChannelID)
+		lastSeen := "—  (not synced yet)"
+		if seeded {
+			lastSeen = fmt.Sprintf("%s  (published %s)", orDash(st.LastSeenID(m.ChannelID)), orDash(st.LastSeenAt(m.ChannelID)))
+		}
+		fmt.Printf("  %-10s  %t\n", "seeded:", seeded)
+		fmt.Printf("  %-10s  %s\n", "last sync:", orDash(st.LastSync(m.ChannelID)))
+		fmt.Printf("  %-10s  %s\n", "last seen:", lastSeen)
+	}
+	return nil
+}
+
 func nameOrUnnamed(s string) string {
 	if s == "" {
 		return "<unnamed>"
+	}
+	return s
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
 	}
 	return s
 }
@@ -203,6 +242,7 @@ func main() {
 	addPlaylist := flag.String("add-playlist", "", "playlist id to add (requires --add-channel)")
 	removeChannel := flag.String("remove-channel", "", "channel id to remove")
 	list := flag.Bool("list", false, "list configured channel→playlist pairs")
+	status := flag.Bool("status", false, "print per-channel sync state and exit")
 	logLevel := flag.String("log-level", "info", "log severity: debug/info/warn/error")
 	flag.Parse()
 
@@ -214,6 +254,7 @@ func main() {
 	modeAdd := *addChannel != "" || *addPlaylist != ""
 	modeRemove := *removeChannel != ""
 	modeList := *list
+	modeStatus := *status
 	modes := 0
 	if modeAdd {
 		modes++
@@ -224,8 +265,11 @@ func main() {
 	if modeList {
 		modes++
 	}
+	if modeStatus {
+		modes++
+	}
 	if modes > 1 {
-		fmt.Fprintln(os.Stderr, "error: --add-channel/--add-playlist, --remove-channel, and --list are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --add-channel/--add-playlist, --remove-channel, --list, and --status are mutually exclusive")
 		os.Exit(2)
 	}
 	if modeAdd && (*addChannel == "" || *addPlaylist == "") {
@@ -237,6 +281,8 @@ func main() {
 	switch {
 	case modeList:
 		cmdName = "list"
+	case modeStatus:
+		cmdName = "status"
 	case modeRemove:
 		cmdName = "remove"
 	case modeAdd:
@@ -246,6 +292,8 @@ func main() {
 	switch cmdName {
 	case "sync":
 		attrs = append(attrs, "secrets", *secretsPath, "state", *statePath)
+	case "status":
+		attrs = append(attrs, "state", *statePath)
 	case "add":
 		attrs = append(attrs, "secrets", *secretsPath)
 	}
@@ -260,6 +308,8 @@ func main() {
 	switch {
 	case modeList:
 		err = RunList(*configPath)
+	case modeStatus:
+		err = RunStatus(*configPath, *statePath)
 	case modeRemove:
 		err = RunRemove(*configPath, *removeChannel)
 	case modeAdd:

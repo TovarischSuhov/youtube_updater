@@ -45,6 +45,11 @@ Annotations: |
 
       `channelID`: the channel identifier
       `publishedAt`: RFC 3339 timestamp of the last seen video, empty if unseeded
+    "LastSync(channelID: string) -> lastSync:string": |
+      The timestamp of the last successful sync recorded for the channel.
+
+      `channelID`: the channel identifier
+      `lastSync`: RFC 3339 timestamp of the last sync, empty if the channel is unseeded
     "SetLastSeen(channelID: string, videoID: string, publishedAt: string) -> err:error": |
       Record the last seen video for a channel and mark it seeded.
 

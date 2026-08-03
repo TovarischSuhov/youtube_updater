@@ -13,6 +13,7 @@ func TestContractSurface(t *testing.T) {
 	var _ func(string) bool = s.IsSeeded
 	var _ func(string) string = s.LastSeenID
 	var _ func(string) string = s.LastSeenAt
+	var _ func(string) string = s.LastSync
 	var _ func(string, string, string) error = s.SetLastSeen
 	var _ func() error = s.Save
 	var _ func(string) (*State, error) = NewState
@@ -83,5 +84,18 @@ func TestState_SetLastSeen_RejectsBadTimestamp(t *testing.T) {
 	}
 	if err := s.SetLastSeen("UC1", "v1", ""); err == nil {
 		t.Fatal("expected error for empty timestamp")
+	}
+}
+
+func TestState_LastSync_EmptyUntilSeeded(t *testing.T) {
+	s, _ := NewState(filepath.Join(t.TempDir(), "state.json"))
+	if got := s.LastSync("UC1"); got != "" {
+		t.Errorf("LastSync unseeded = %q, want empty", got)
+	}
+	if err := s.SetLastSeen("UC1", "v1", "2026-07-27T10:00:00Z"); err != nil {
+		t.Fatalf("SetLastSeen error: %v", err)
+	}
+	if got := s.LastSync("UC1"); got == "" {
+		t.Error("LastSync empty after SetLastSeen; want a timestamp")
 	}
 }

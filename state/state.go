@@ -61,6 +61,12 @@ func (s *State) LastSeenAt(channelID string) string {
 	return s.channels[channelID].LastSeenAt
 }
 
+// LastSync returns the timestamp of the last successful sync recorded for the
+// channel (RFC 3339; empty if the channel is unseeded).
+func (s *State) LastSync(channelID string) string {
+	return s.channels[channelID].LastSync
+}
+
 // SetLastSeen records the last seen video for a channel and marks it seeded.
 // publishedAt must be a non-empty RFC 3339 timestamp.
 func (s *State) SetLastSeen(channelID, videoID, publishedAt string) error {
