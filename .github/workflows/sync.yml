@@ -9,11 +9,12 @@
 #   3. Commit config.yaml with your channel→playlist pairs (added via
 #      --add-channel/--add-playlist). It carries no secrets and is tracked.
 #
-# state.json (the last-seen watermark per channel) is cached across runs so the
-# syncer advances its cursor instead of re-seeding — without it every run would
-# see every channel as new and add nothing. token.json is NOT persisted: the
-# refresh token in the secret is long-lived and reused each run; an expired
-# access token is refreshed in-process by the youtube package.
+# state.json (the last-seen watermark per channel) is committed back to this
+# branch after each run, so the syncer advances its cursor instead of re-seeding
+# — without it every run would see every channel as new and add nothing.
+# token.json is NOT persisted to git: the refresh token in the secret is
+# long-lived and reused each run; an expired access token is refreshed
+# in-process by the youtube package.
 name: Sync YouTube playlists
 
 on:
@@ -21,31 +22,30 @@ on:
     - cron: '17 6,18 * * *' # twice a day, 06:17 & 18:17 UTC
   workflow_dispatch: {} # manual "Run workflow" button
 
-# Queue runs instead of racing on shared cached state. A scheduled run while one
-# is in flight waits; manual dispatch likewise.
+# Queue runs instead of racing on the shared state.json. A scheduled run while
+# one is in flight waits; manual dispatch likewise.
 concurrency:
   group: youtube-sync
   cancel-in-progress: false
+
+# The default GITHUB_TOKEN must be allowed to push the state.json commit.
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # Full history so the `git pull --rebase` in the commit step is reliable if
+      # master advanced between checkout and push.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.3'
           cache: true
-
-      # Restore the prior run's watermark. The lookup key is unique per run, so it
-      # always misses on its own and falls back to the newest yt-state- entry.
-      - name: Restore last-seen state
-        uses: actions/cache/restore@v4
-        with:
-          path: state.json
-          key: yt-state-${{ github.run_id }}
-          restore-keys: yt-state-
 
       - name: Write OAuth credentials
         run: |
@@ -62,11 +62,22 @@ jobs:
       - name: Sync
         run: go run ./cmd
 
-      # Persist the updated watermark for the next run. Guarded on the file
-      # existing so a crashed run (which never wrote state.json) is a no-op.
-      - name: Save last-seen state
-        if: always() && hashFiles('state.json') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: state.json
-          key: yt-state-${{ github.run_id }}
+      # Commit the advanced watermark back to master so the next run continues
+      # from it. No-op when state.json is unchanged (--dry-run, a crashed sync
+      # where Save() never ran, or no new videos). `git pull --rebase` handles
+      # the rare case of a human push landing mid-run; concurrency already
+      # serializes CI-vs-CI runs. GITHUB_TOKEN pushes don't trigger workflows,
+      # so this commit can't re-trigger the sync.
+      - name: Commit & push updated state
+        if: always()
+        run: |
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "state.json unchanged; nothing to commit"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(ci): advance sync state"
+          git pull --rebase origin master
+          git push origin master

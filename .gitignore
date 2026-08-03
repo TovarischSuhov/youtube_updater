@@ -1,7 +1,7 @@
-# Secrets & runtime state — never commit
+# Secrets — never commit (state.json IS tracked: it holds only public video
+# IDs + timestamps and is committed by CI as the sync cursor).
 client_secrets.json
 token.json
-state.json
 
 # Built binary
 /youtube-updater

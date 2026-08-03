@@ -8,9 +8,10 @@
 # (non-failing) ::warning:: annotations plus a "Sync status" section in the run
 # summary. The job stays green; you just see which channels need attention.
 #
-# This performs a REAL sync (it advances playlists and the cached state), so it
-# doubles as an on-demand sync. For a read-only preview, add --dry-run to the
-# Sync step — marking still works, since channel API errors are logged either way.
+# This performs a REAL sync (it advances playlists and commits the new state to
+# git), so it doubles as an on-demand sync. For a read-only preview, add
+# --dry-run to the Sync step — marking still works, since channel API errors are
+# logged either way (and with --dry-run the state commit step is a no-op).
 #
 # Same setup as sync.yml: CLIENT_SECRETS_JSON and TOKEN_JSON repo secrets, and a
 # committed config.yaml with your pairs.
@@ -20,28 +21,29 @@ on:
   workflow_dispatch: {} # manual "Run workflow" button only
 
 # Shares the sync.yml concurrency group so a manual run never overlaps a
-# scheduled one (both touch the same cached state.json).
+# scheduled one (both read and commit the same state.json).
 concurrency:
   group: youtube-sync
   cancel-in-progress: false
+
+# The default GITHUB_TOKEN must be allowed to push the state.json commit.
+permissions:
+  contents: write
 
 jobs:
   status:
     runs-on: ubuntu-latest
     steps:
+      # Full history so the `git pull --rebase` in the commit step is reliable if
+      # master advanced between checkout and push.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.3'
           cache: true
-
-      - name: Restore last-seen state
-        uses: actions/cache/restore@v4
-        with:
-          path: state.json
-          key: yt-state-${{ github.run_id }}
-          restore-keys: yt-state-
 
       - name: Write OAuth credentials
         run: |
@@ -99,9 +101,19 @@ jobs:
             [ -n "$cid" ] && echo "::warning::channel $cid failed to update"
           done
 
-      - name: Save last-seen state
-        if: always() && hashFiles('state.json') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: state.json
-          key: yt-state-${{ github.run_id }}
+      # Commit the advanced watermark back to master (same step as sync.yml).
+      # No-op when state.json is unchanged (--dry-run, crashed sync, no new
+      # videos). Runs after the Mark step regardless of outcome.
+      - name: Commit & push updated state
+        if: always()
+        run: |
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "state.json unchanged; nothing to commit"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(ci): advance sync state"
+          git pull --rebase origin master
+          git push origin master

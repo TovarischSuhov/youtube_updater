@@ -115,10 +115,12 @@ exclusive.
 | `config.yaml` | committed | Your channel → playlist pairs |
 | `client_secrets.json` | gitignored | OAuth client credentials |
 | `token.json` | gitignored | Cached OAuth token (refresh token) |
-| `state.json` | gitignored | Per-channel last-seen watermark |
+| `state.json` | committed | Per-channel last-seen watermark (advanced by CI) |
 
-`config.yaml` holds no secrets, so commit it with your pairs. The other three are
-gitignored — keep them local.
+`config.yaml` holds no secrets, so commit it with your pairs. `client_secrets.json`
+and `token.json` are gitignored secrets — keep them local (CI injects them from
+repo secrets). `state.json` carries only public video IDs and timestamps, so it is
+tracked and committed by CI as the sync cursor.
 
 ### `config.yaml` format
 
@@ -143,10 +145,11 @@ runs the sync in CI so you don't have to. To enable it:
    contents each).
 3. Commit `config.yaml` with your pairs.
 
-The workflow writes both secrets to disk, runs the sync, and caches `state.json`
-between runs so the watermark advances instead of re-seeding each time. The
-refresh token is long-lived, so the same `TOKEN_JSON` secret is reused every run.
-Trigger it manually from the Actions tab or let the daily schedule run it.
+The workflow writes both secrets to disk, runs the sync, and commits the updated
+`state.json` back to `master` so the watermark advances instead of re-seeding
+each time. The refresh token is long-lived, so the same `TOKEN_JSON` secret is
+reused every run. Trigger it manually from the Actions tab or let the daily
+schedule run it.
 
 ## Manual status check (GitHub Actions)
 
@@ -155,8 +158,8 @@ runs on demand from the Actions tab (no schedule). It lists your configured pair
 runs a sync, and **marks any channel that failed to update** — without failing the
 run. Failed channels show up as warning annotations in the log and in a "Sync
 status" section on the run-summary page; the job stays green, so you can see which
-channels need attention without a hard failure. It shares the same `state.json`
-cache and concurrency group as the daily sync, so the two never overlap or diverge.
+channels need attention without a hard failure. It commits `state.json` and shares
+the same concurrency group as the daily sync, so the two never overlap or diverge.
 
 No extra setup beyond the two secrets and a committed `config.yaml`.
 
