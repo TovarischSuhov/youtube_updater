@@ -27,6 +27,17 @@ name: Sync YouTube playlists
 on:
   push:
     branches: [master]
+    # Build only when something that affects the compiled binary changes. The
+    # sync job commits state.json back to master after every run; without this
+    # filter each state-only commit would rebuild an identical binary. (Those
+    # commits push via GITHUB_TOKEN, whose pushes already don't trigger
+    # workflows — this filter makes the intent explicit and survives a later
+    # switch to a PAT/App token.) schedule and workflow_dispatch are unaffected.
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/sync.yml'
   schedule:
     - cron: '7,37 * * * *' # every 30 minutes, at :07 & :37 past the hour UTC
   workflow_dispatch: {} # manual "Run workflow" button
