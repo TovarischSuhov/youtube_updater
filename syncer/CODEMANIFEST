@@ -60,7 +60,7 @@ Annotations: |
        5. Else:
           - read the watermark from `State`
           - select `Video` items whose PublishedAt is greater than the watermark
-          - drop Shorts and live streams via `YouTube.FilterRegularVideos`, keeping
+          - drop Shorts and live streams via `YouTube` (FilterRegularVideos), keeping
             only regular long-form uploads
           - unless `dryRun`, insert each kept `Video` into the playlist via
             `YouTube`, oldest first, then set the channel's last-seen cursor to the
