@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ func TestContractSurface(t *testing.T) {
 	var y YouTube
 	var _ func(string) (string, error) = y.ResolveUploads
 	var _ func(string) ([]Video, error) = y.ListUploads
+	var _ func([]Video) ([]Video, error) = y.FilterRegularVideos
 	var _ func(string, string) (string, error) = y.AddToPlaylist
 	var _ func(string, string) (string, string, error) = y.ResolveNames
 	var _ func(ChannelRef) (string, error) = y.ResolveChannelRef
@@ -37,6 +39,17 @@ func newTestYouTube(t *testing.T, h http.HandlerFunc) *YouTube {
 		t.Fatalf("new service: %v", err)
 	}
 	return newWithService(svc)
+}
+
+// videoIDs returns every id from a /videos list request. The google-api client
+// sends multiple ids as repeated id= query params, so Query().Get would only see
+// the first; this also tolerates a comma-joined single value.
+func videoIDs(r *http.Request) []string {
+	var ids []string
+	for _, v := range r.URL.Query()["id"] {
+		ids = append(ids, strings.Split(v, ",")...)
+	}
+	return ids
 }
 
 func TestResolveUploads_ReturnsUploadsPlaylistID(t *testing.T) {
@@ -285,5 +298,106 @@ func TestResolveChannelRef_NotFound_ReturnsError(t *testing.T) {
 	})
 	if _, err := yt.ResolveChannelRef(ChannelRef{Kind: "handle", Slug: "Ghost"}); err == nil {
 		t.Fatal("expected error for unresolved handle, got nil")
+	}
+}
+
+func TestParseISODuration(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+		ok   bool
+	}{
+		{"PT45S", 45 * time.Second, true},
+		{"PT1M", 60 * time.Second, true}, // Short boundary: exactly 60s is a Short
+		{"PT1M1S", 61 * time.Second, true},
+		{"PT1M30S", 90 * time.Second, true},
+		{"PT1H", time.Hour, true},
+		{"PT2H1M10S", 2*time.Hour + time.Minute + 10*time.Second, true},
+		{"P1D", 24 * time.Hour, true},
+		{"P0D", 0, true},
+		{"", 0, false},
+		{"garbage", 0, false},
+		{"P1X", 0, false},
+		{"PT1M30", 0, false}, // trailing digits with no unit
+	}
+	for _, c := range cases {
+		got, ok := parseISODuration(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("parseISODuration(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestFilterRegularVideos_DropsShortsAndStreams(t *testing.T) {
+	kind := map[string]string{"v_regular": "", "v_short": "short", "v_stream": "stream"}
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/youtube/v3/videos" {
+			http.NotFound(w, r)
+			return
+		}
+		var items []string
+		for _, id := range videoIDs(r) {
+			switch kind[id] {
+			case "short":
+				items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT30S"}}`, id))
+			case "stream":
+				items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT1H"},"liveStreamingDetails":{"actualStartTime":"2026-01-01T00:00:00Z"}}`, id))
+			default:
+				items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT10M"}}`, id))
+			}
+		}
+		fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
+	})
+	in := []Video{
+		{ID: "v_regular", PublishedAt: "2026-08-01T10:00:00Z"},
+		{ID: "v_short", PublishedAt: "2026-08-01T11:00:00Z"},
+		{ID: "v_stream", PublishedAt: "2026-08-01T12:00:00Z"},
+	}
+	got, err := yt.FilterRegularVideos(in)
+	if err != nil {
+		t.Fatalf("FilterRegularVideos error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "v_regular" {
+		t.Errorf("got %+v, want only [v_regular] (Short and stream dropped)", got)
+	}
+}
+
+func TestFilterRegularVideos_PreservesOrder(t *testing.T) {
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		// All regular; verifies newest-first input order is preserved.
+		var items []string
+		for _, id := range videoIDs(r) {
+			items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT5M"}}`, id))
+		}
+		fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
+	})
+	in := []Video{
+		{ID: "a", PublishedAt: "2026-08-01T03:00:00Z"},
+		{ID: "b", PublishedAt: "2026-08-01T02:00:00Z"},
+		{ID: "c", PublishedAt: "2026-08-01T01:00:00Z"},
+	}
+	got, err := yt.FilterRegularVideos(in)
+	if err != nil {
+		t.Fatalf("FilterRegularVideos error: %v", err)
+	}
+	if len(got) != 3 || got[0].ID != "a" || got[2].ID != "c" {
+		t.Errorf("order not preserved: %+v", got)
+	}
+}
+
+func TestFilterRegularVideos_EmptyInput_NoServerHit(t *testing.T) {
+	called := false
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	got, err := yt.FilterRegularVideos(nil)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %+v, want nil", got)
+	}
+	if called {
+		t.Error("API was hit for empty input")
 	}
 }

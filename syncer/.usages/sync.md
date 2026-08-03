@@ -13,4 +13,6 @@ How to drive the orchestrator (package `syncer`) and read its results.
 ## Read ChannelResult
 Each result reports ChannelID, PlaylistID, Seeded (first-contact run, nothing
 added), NewCount, AddedIDs, and Err (set if that channel failed; other channels are
-still processed).
+still processed). NewCount and AddedIDs count only regular long-form videos:
+Shorts and live streams are skipped, and the watermark still advances past them so
+they are never re-added.

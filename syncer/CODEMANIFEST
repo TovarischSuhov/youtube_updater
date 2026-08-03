@@ -60,8 +60,12 @@ Annotations: |
        5. Else:
           - read the watermark from `State`
           - select `Video` items whose PublishedAt is greater than the watermark
-          - unless `dryRun`, insert each into the playlist via `YouTube`, oldest
-            first, then set the channel's last-seen cursor to the newest `Video`
+          - drop Shorts and live streams via `YouTube.FilterRegularVideos`, keeping
+            only regular long-form uploads
+          - unless `dryRun`, insert each kept `Video` into the playlist via
+            `YouTube`, oldest first, then set the channel's last-seen cursor to the
+            newest `Video` (the cursor advances past excluded uploads too, so they
+            are never re-scanned)
           - build a `ChannelResult` with NewCount and the added identifiers
     2. Return `results`
 

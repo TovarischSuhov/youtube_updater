@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,6 +110,113 @@ func (y *YouTube) ListUploads(uploadsPlaylistID string) ([]Video, error) {
 		return nil, err
 	}
 	return videos, nil
+}
+
+// shortMaxDuration is the upper bound for a YouTube Short: videos at or below 60s
+// are treated as Shorts and excluded from sync.
+const shortMaxDuration = 60 * time.Second
+
+// FilterRegularVideos drops Shorts (duration ≤ shortMaxDuration) and live streams
+// (any video carrying liveStreamingDetails — live, ended, or premiere) from
+// videos, returning only regular long-form uploads in their original order.
+//
+// It classifies via videos.list (contentDetails for duration, liveStreamingDetails
+// for streams), batched at ≤50 ids per call. A video absent from the response
+// (deleted or made private between listing and classification) is dropped — it
+// cannot be added to a playlist anyway. A video whose duration fails to parse is
+// kept rather than silently dropped on an unrecognised format.
+func (y *YouTube) FilterRegularVideos(videos []Video) ([]Video, error) {
+	if len(videos) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(videos))
+	for i, v := range videos {
+		ids[i] = v.ID
+	}
+
+	keep := make(map[string]bool, len(videos))
+	for start := 0; start < len(ids); start += 50 {
+		batch := ids[start:min(start+50, len(ids))]
+		if err := withRetry("classify videos", func() error {
+			resp, err := y.svc.Videos.List([]string{"contentDetails", "liveStreamingDetails"}).Id(batch...).Do()
+			if err != nil {
+				return err
+			}
+			for _, it := range resp.Items {
+				d, ok := parseISODuration(it.ContentDetails.Duration)
+				if !ok {
+					keep[it.Id] = true // unrecognised format: don't drop on a guess
+					continue
+				}
+				if d <= shortMaxDuration {
+					continue // Short
+				}
+				if it.LiveStreamingDetails != nil {
+					continue // live stream / premiere
+				}
+				keep[it.Id] = true
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	out := make([]Video, 0, len(keep))
+	for _, v := range videos {
+		if keep[v.ID] {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+// parseISODuration parses the subset of ISO 8601 durations YouTube returns for
+// video lengths (e.g. "PT1M30S", "PT45S", "PT1H", "P1D"). ok=false if s is not a
+// recognised duration. YouTube never emits month/year components, so 'M' is taken
+// as minutes (it only ever follows 'T') and 'D' as days.
+func parseISODuration(s string) (time.Duration, bool) {
+	if len(s) < 2 || s[0] != 'P' {
+		return 0, false
+	}
+	var d time.Duration
+	num := ""
+	flush := func(unit byte) bool {
+		if num == "" {
+			return false
+		}
+		n, err := strconv.Atoi(num)
+		num = ""
+		if err != nil {
+			return false
+		}
+		switch unit {
+		case 'D':
+			d += time.Duration(n) * 24 * time.Hour
+		case 'H':
+			d += time.Duration(n) * time.Hour
+		case 'M':
+			d += time.Duration(n) * time.Minute
+		case 'S':
+			d += time.Duration(n) * time.Second
+		}
+		return true
+	}
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			num += string(c)
+		case c == 'T':
+			// separator between date and time components
+		case c == 'D' || c == 'H' || c == 'M' || c == 'S':
+			if !flush(c) {
+				return 0, false
+			}
+		default:
+			return 0, false
+		}
+	}
+	return d, num == "" // trailing digits with no unit is malformed
 }
 
 // AddToPlaylist inserts a video into a playlist and returns the created item id.

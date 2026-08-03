@@ -1,5 +1,12 @@
 # Syncs new YouTube uploads into configured playlists on a schedule.
 #
+# Two jobs share this workflow:
+#   build — runs on every push to master, compiles the binary, and caches it
+#           keyed on the Go source hash so scheduled runs don't recompile.
+#   sync  — runs on the 30-minute schedule (and manual dispatch), restores the
+#           cached binary, and runs it directly. On a cold/evicted cache it
+#           falls back to compiling, so sync never blocks on a missing binary.
+#
 # One-time setup (local):
 #   1. Run the binary once to complete the OAuth consent flow, producing a
 #      token.json that contains a long-lived refresh token.
@@ -10,31 +17,62 @@
 #      --add-channel/--add-playlist). It carries no secrets and is tracked.
 #
 # state.json (the last-seen watermark per channel) is committed back to this
-# branch after each run, so the syncer advances its cursor instead of re-seeding
-# — without it every run would see every channel as new and add nothing.
-# token.json is NOT persisted to git: the refresh token in the secret is
-# long-lived and reused each run; an expired access token is refreshed
+# branch after each sync run, so the syncer advances its cursor instead of
+# re-seeding — without it every run would see every channel as new and add
+# nothing. token.json is NOT persisted to git: the refresh token in the secret
+# is long-lived and reused each run; an expired access token is refreshed
 # in-process by the youtube package.
 name: Sync YouTube playlists
 
 on:
+  push:
+    branches: [master]
   schedule:
-    - cron: '17 6,18 * * *' # twice a day, 06:17 & 18:17 UTC
+    - cron: '7,37 * * * *' # every 30 minutes, at :07 & :37 past the hour UTC
   workflow_dispatch: {} # manual "Run workflow" button
-
-# Queue runs instead of racing on the shared state.json. A scheduled run while
-# one is in flight waits; manual dispatch likewise.
-concurrency:
-  group: youtube-sync
-  cancel-in-progress: false
 
 # The default GITHUB_TOKEN must be allowed to push the state.json commit.
 permissions:
   contents: write
 
 jobs:
-  sync:
+  # Compiles the binary on every commit and caches it under a key derived from
+  # the Go sources. The sync job restores this exact key; a source change yields
+  # a new key, so sync can never run a stale binary from older code.
+  build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache: true
+
+      - name: Build
+        run: go build -o youtube-updater ./cmd
+
+      # save fails if the key already exists (e.g. re-running the workflow on an
+      # unchanged commit); that's harmless since the cached binary is identical.
+      - name: Cache binary
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: youtube-updater
+          key: yt-binary-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+
+  # Runs the cached binary. No Go toolchain or compile on the warm-cache path;
+  # only a cold cache (first run, eviction) pays the compile cost.
+  sync:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Queue runs instead of racing on the shared state.json. A scheduled run while
+    # one is in flight waits; manual dispatch likewise. (Build has no group: it
+    # never touches state.json, so it need not wait on a sync.)
+    concurrency:
+      group: youtube-sync
+      cancel-in-progress: false
     steps:
       # Full history so the `git pull --rebase` in the commit step is reliable if
       # master advanced between checkout and push.
@@ -42,10 +80,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Restore cached binary
+        id: bin
+        uses: actions/cache/restore@v4
+        with:
+          path: youtube-updater
+          key: yt-binary-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+          fail-on-cache-miss: false
+
+      # Cold-cache fallback: compile locally so a missing/evicted cache can never
+      # block a scheduled sync. Skipped entirely on a cache hit (no Go needed).
+      - name: Set up Go (cache miss)
+        if: steps.bin.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
         with:
           go-version: '1.26.3'
           cache: true
+      - name: Build (cache miss)
+        if: steps.bin.outputs.cache-hit != 'true'
+        run: go build -o youtube-updater ./cmd
 
       - name: Write OAuth credentials
         run: |
@@ -57,17 +110,20 @@ jobs:
           CLIENT_SECRETS_JSON: ${{ secrets.CLIENT_SECRETS_JSON }}
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
 
-      # Runs from repo root so the binary finds config.yaml, client_secrets.json,
-      # token.json, and state.json via their default relative paths.
+      # Runs the prebuilt binary from repo root so it finds config.yaml,
+      # client_secrets.json, token.json, and state.json via their default
+      # relative paths.
       - name: Sync
-        run: go run ./cmd
+        run: |
+          chmod +x youtube-updater
+          ./youtube-updater
 
       # Commit the advanced watermark back to master so the next run continues
-      # from it. No-op when state.json is unchanged (--dry-run, a crashed sync
-      # where Save() never ran, or no new videos). `git pull --rebase` handles
-      # the rare case of a human push landing mid-run; concurrency already
-      # serializes CI-vs-CI runs. GITHUB_TOKEN pushes don't trigger workflows,
-      # so this commit can't re-trigger the sync.
+      # from it. No-op when state.json is unchanged (sync that added nothing, a
+      # crashed run where Save() never ran, or no new videos). `git pull --rebase`
+      # handles the rare case of a human push landing mid-run; concurrency already
+      # serializes CI-vs-CI runs. GITHUB_TOKEN pushes don't trigger workflows, so
+      # this commit can't re-trigger the sync.
       - name: Commit & push updated state
         if: always()
         run: |

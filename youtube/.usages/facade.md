@@ -21,6 +21,14 @@ writes the token to tokenPath; later constructions reuse and refresh it silently
 
     videos, err := youTube.ListUploads(uploadsID) // []youtube.Video
 
+## Keep only regular videos (drop Shorts and streams)
+
+    regular, err := youTube.FilterRegularVideos(videos) // []youtube.Video
+
+Removes Shorts (duration ≤ 60s) and live streams (any video with live streaming
+details) and returns the rest in input order. Pass the new-since-watermark subset
+so classification batches only what may be added.
+
 ## Add a video to a playlist
 
     itemID, err := youTube.AddToPlaylist(playlistID, videoID)

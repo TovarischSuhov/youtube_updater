@@ -67,13 +67,22 @@ func syncOne(yt *youtube.YouTube, st *state.State, m config.ChannelMapping, dryR
 	// Subsequent contact: add only videos newer than the watermark.
 	mark := st.LastSeenAt(m.ChannelID)
 	isNew := selectNew(videos, mark)
-	r.NewCount = len(isNew)
-	r.AddedIDs = idsOf(isNew)
+
+	// Sync only regular long-form uploads: drop Shorts and live streams. The
+	// watermark still advances to `newest` regardless, so excluded uploads are
+	// never re-scanned on later runs.
+	toAdd, err := yt.FilterRegularVideos(isNew)
+	if err != nil {
+		r.Err = fmt.Errorf("classify %s: %w", m.ChannelID, err)
+		return r
+	}
+	r.NewCount = len(toAdd)
+	r.AddedIDs = idsOf(toAdd)
 
 	if !dryRun {
-		// Insert oldest→newest to keep playlist chronological. isNew is
+		// Insert oldest→newest to keep playlist chronological. toAdd is
 		// newest-first (same order as ListUploads), so walk it in reverse.
-		for _, v := range slices.Backward(isNew) {
+		for _, v := range slices.Backward(toAdd) {
 			if _, err := yt.AddToPlaylist(m.PlaylistID, v.ID); err != nil {
 				r.Err = fmt.Errorf("add %s/%s: %w", m.ChannelID, v.ID, err)
 				break

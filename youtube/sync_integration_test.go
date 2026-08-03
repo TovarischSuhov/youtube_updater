@@ -30,8 +30,10 @@ type harness struct {
 }
 
 // newHarness builds a fake server. byChannel maps channelID → its uploads
-// (newest-first); notFound maps channelID → true to make ResolveUploads 404.
-func newHarness(t *testing.T, byChannel map[string][]youtube.Video, notFound map[string]bool) *harness {
+// (newest-first); notFound maps channelID → true to make ResolveUploads 404; kind
+// maps videoID → "short"|"stream" to drive the videos.list classifier (absent =
+// regular long-form). All videos default to regular when kind is nil/empty.
+func newHarness(t *testing.T, byChannel map[string][]youtube.Video, notFound map[string]bool, kind map[string]string) *harness {
 	t.Helper()
 	h := &harness{}
 	h.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +45,23 @@ func newHarness(t *testing.T, byChannel map[string][]youtube.Video, notFound map
 				return
 			}
 			fmt.Fprintf(w, `{"items":[{"id":%q,"contentDetails":{"relatedPlaylists":{"uploads":%q}}}]}`, id, "UU"+id)
+		case "/youtube/v3/videos":
+			var ids []string
+			for _, v := range r.URL.Query()["id"] {
+				ids = append(ids, strings.Split(v, ",")...)
+			}
+			var items []string
+			for _, id := range ids {
+				switch kind[id] {
+				case "short":
+					items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT30S"}}`, id))
+				case "stream":
+					items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT1H"},"liveStreamingDetails":{"actualStartTime":"2026-01-01T00:00:00Z"}}`, id))
+				default:
+					items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT10M"}}`, id))
+				}
+			}
+			fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
 		case "/youtube/v3/playlistItems":
 			if r.Method == http.MethodGet {
 				pl := r.URL.Query().Get("playlistId")
@@ -120,7 +139,7 @@ func TestSyncAll_AddsOnlyNewVideos_AdvancesCursor(t *testing.T) {
 		{ID: "v1", PublishedAt: "2026-07-27T13:00:00Z"},
 		{ID: "old", PublishedAt: "2026-07-27T09:00:00Z"},
 	}
-	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil)
+	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, nil)
 	st := seededState(t, "UCa", "2026-07-27T10:00:00Z") // watermark 10:00
 
 	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, false)
@@ -147,7 +166,7 @@ func TestSyncAll_SeedsOnFirstContact_AddsNothing(t *testing.T) {
 		{ID: "v5", PublishedAt: "2026-07-27T15:00:00Z"},
 		{ID: "v3", PublishedAt: "2026-07-27T13:00:00Z"},
 	}
-	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil)
+	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, nil)
 	st := freshState(t) // unseeded
 
 	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, false)
@@ -166,7 +185,7 @@ func TestSyncAll_SeedsOnFirstContact_AddsNothing(t *testing.T) {
 }
 
 func TestSyncAll_EmptyUploads_SkipsChannel_NoCursor(t *testing.T) {
-	h := newHarness(t, map[string][]youtube.Video{"UCa": nil}, nil)
+	h := newHarness(t, map[string][]youtube.Video{"UCa": nil}, nil, nil)
 	st := freshState(t) // unseeded
 
 	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, false)
@@ -189,7 +208,7 @@ func TestSyncAll_NoNewVideos_PerformsZeroInserts(t *testing.T) {
 		{ID: "v3", PublishedAt: "2026-07-27T13:00:00Z"},
 		{ID: "v1", PublishedAt: "2026-07-27T11:00:00Z"},
 	}
-	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil)
+	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, nil)
 	st := seededState(t, "UCa", "2026-07-27T15:00:00Z") // watermark newer than all
 
 	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, false)
@@ -209,7 +228,7 @@ func TestSyncAll_DryRun_MutatesNothing(t *testing.T) {
 		{ID: "v5", PublishedAt: "2026-07-27T15:00:00Z"},
 		{ID: "v1", PublishedAt: "2026-07-27T13:00:00Z"},
 	}
-	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil)
+	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, nil)
 	st := seededState(t, "UCa", "2026-07-27T10:00:00Z")
 
 	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, true)
@@ -232,7 +251,7 @@ func TestSyncAll_ReRunIsIdempotent(t *testing.T) {
 		{ID: "v5", PublishedAt: "2026-07-27T15:00:00Z"},
 		{ID: "v3", PublishedAt: "2026-07-27T13:00:00Z"},
 	}
-	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil)
+	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, nil)
 	st := seededState(t, "UCa", "2026-07-27T10:00:00Z")
 	mappings := []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}
 
@@ -256,7 +275,7 @@ func TestSyncAll_ReRunIsIdempotent(t *testing.T) {
 }
 
 func TestSyncAll_ChannelError_RecordsPerChannel_ContinuesOthers(t *testing.T) {
-	h := newHarness(t, map[string][]youtube.Video{"UCb": {{ID: "v1", PublishedAt: "2026-07-27T11:00:00Z"}}}, map[string]bool{"UCa": true})
+	h := newHarness(t, map[string][]youtube.Video{"UCb": {{ID: "v1", PublishedAt: "2026-07-27T11:00:00Z"}}}, map[string]bool{"UCa": true}, nil)
 	st := freshState(t)
 	mappings := []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}, {ChannelID: "UCb", PlaylistID: "PLb"}}
 
@@ -272,5 +291,36 @@ func TestSyncAll_ChannelError_RecordsPerChannel_ContinuesOthers(t *testing.T) {
 	}
 	if !res[1].Seeded {
 		t.Error("UCb should be seeded on first contact")
+	}
+}
+
+// TestSyncAll_SkipsShortsAndStreams_AdvancesCursor verifies only regular
+// long-form uploads are added; Shorts and streams are skipped, but the watermark
+// still advances past them so they are never re-scanned.
+func TestSyncAll_SkipsShortsAndStreams_AdvancesCursor(t *testing.T) {
+	vids := []youtube.Video{
+		{ID: "v_new", PublishedAt: "2026-07-27T15:00:00Z"},   // regular — should be added
+		{ID: "v_short", PublishedAt: "2026-07-27T14:00:00Z"}, // Short — skipped
+		{ID: "v_stream", PublishedAt: "2026-07-27T13:00:00Z"}, // live stream — skipped
+		{ID: "old", PublishedAt: "2026-07-27T09:00:00Z"},     // below watermark — not new
+	}
+	kind := map[string]string{"v_short": "short", "v_stream": "stream"}
+	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, kind)
+	st := seededState(t, "UCa", "2026-07-27T10:00:00Z")
+
+	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].NewCount != 1 {
+		t.Errorf("NewCount=%d, want 1 (only the regular new video)", res[0].NewCount)
+	}
+	if len(h.inserts) != 1 || h.inserts[0] != "v_new" {
+		t.Fatalf("inserts=%v, want [v_new] only (Short and stream excluded)", h.inserts)
+	}
+	// Cursor advances to the newest upload overall, so the skipped Short/stream
+	// are not re-evaluated on the next run.
+	if st.LastSeenAt("UCa") != "2026-07-27T15:00:00Z" {
+		t.Errorf("cursor=%q, want newest (15:00)", st.LastSeenAt("UCa"))
 	}
 }

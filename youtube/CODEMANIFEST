@@ -59,6 +59,19 @@ Annotations: |
       `err`: error if enumeration fails
 
       Use `youtube-data-api` (playlistItems.list, paginated) to collect items.
+    "FilterRegularVideos(videos: []Video) -> regular:[]Video, err:error": |
+      Drop Shorts and live streams, returning only regular long-form uploads in
+      their original (newest-first) order.
+
+      `videos`: uploads to classify (e.g. the new-since-watermark subset)
+      `regular`: the subset that are regular videos (Shorts/streams removed)
+      `err`: error if classification fails
+
+      A Short is a video whose duration is ≤ 60s; a stream is any video carrying
+      liveStreamingDetails (live, ended, or premiere). Classify via
+      `youtube-data-api` (videos.list contentDetails + liveStreamingDetails),
+      batched at ≤50 ids per call. A video absent from the response (deleted or
+      made private) is dropped; one whose duration fails to parse is kept.
     "AddToPlaylist(playlistID: string, videoID: string) -> itemID:string, err:error": |
       Insert a video into a playlist.
 
