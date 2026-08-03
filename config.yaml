@@ -1,1 +1,109 @@
-channels: []
+channels:
+    - channel_id: UCLqdi5MHui0yr8D6LFDWBBA
+      playlist_id: PLfFRwYQfcR_Q2qonDGkVIY0nMr36Yqaqn
+      channel_name: Wanderbraun — Age of Empires
+      playlist_name: aoe
+    - channel_id: UCm3BAnotyqfdvm6sO5bs18g
+      playlist_id: PLfFRwYQfcR_Q2qonDGkVIY0nMr36Yqaqn
+      channel_name: Vinchester
+      playlist_name: aoe
+    - channel_id: UCT_Y1oUhPB3HPr7e3EiUyMw
+      playlist_id: PLfFRwYQfcR_Q2qonDGkVIY0nMr36Yqaqn
+      channel_name: Цитадель Стратегий Грина
+      playlist_name: aoe
+    - channel_id: UCNU6DogaGEdQfDuTkJaGXnw
+      playlist_id: PLfFRwYQfcR_Q2qonDGkVIY0nMr36Yqaqn
+      channel_name: 'Kiritastrich '
+      playlist_name: aoe
+    - channel_id: UCchhChxS5Pqm1-oNtuEF9Rw
+      playlist_id: PLfFRwYQfcR_Q2qonDGkVIY0nMr36Yqaqn
+      channel_name: OLADUSHEK - Age of Empires 2
+      playlist_name: aoe
+    - channel_id: UC2JzWVFH-iiehX-FXHkia4w
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Интерьерно
+      playlist_name: Autoplaylist
+    - channel_id: UCDbRLfH5Y2R5rdNZpdzXiFw
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Sir Troglodyte
+      playlist_name: Autoplaylist
+    - channel_id: UCGrIdqglGZ5QE8X8oPhanMA
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Natashka PLUS
+      playlist_name: Autoplaylist
+    - channel_id: UC_mPBfl442yiubiPyswqulA
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Владимир Чайкин
+      playlist_name: Autoplaylist
+    - channel_id: UCXFxgPppcehs2LoiKhkakQg
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: SuperCrastan
+      playlist_name: Autoplaylist
+    - channel_id: UCgJx5iz9g_PcOe0zFcKwfzA
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Archeoclub
+      playlist_name: Autoplaylist
+    - channel_id: UCRswdm0dNllxuViL7HE95pg
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Урал Гидро
+      playlist_name: Autoplaylist
+    - channel_id: UCnM70FH8iM4bOisTHNyxBXg
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: The Joy
+      playlist_name: Autoplaylist
+    - channel_id: UCU-aE_Msmt-2dPOkTm145Bw
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: РЮКЗАК ЧАЙКИНА
+      playlist_name: Autoplaylist
+    - channel_id: UCLQKgfYBpZnyNajVK5gAojw
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: ПсихоСофия
+      playlist_name: Autoplaylist
+    - channel_id: UCglNYRt1fJ3RmDrWpVG1Bsg
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Thujoy
+      playlist_name: Autoplaylist
+    - channel_id: UCt34mT-socRqtiY9iO_LzYQ
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: Дикий Крастер
+      playlist_name: Autoplaylist
+    - channel_id: UC6cqazSR6CnVMClY0bJI0Lg
+      playlist_id: PLPmI7JhdNPDE
+      channel_name: BadComedian
+      playlist_name: Autoplaylist
+    - channel_id: UCfsgMi5B1fSZQ3jrDtlML7Q
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: LANKARRA
+      playlist_name: Podcast
+    - channel_id: UCVVNJJXC7TQgPpAjQdgrqNw
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Александр Штефанов
+      playlist_name: Podcast
+    - channel_id: UCmOIFDD7Ngj8-9SjXsjKwAQ
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Эльфийский Танкист
+      playlist_name: Podcast
+    - channel_id: UC-_iyv1-5NM5wmypELjz8Aw
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Максим Кузнецов
+      playlist_name: Podcast
+    - channel_id: UC6zaKCVI0bU-eIyCFPPYmjg
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: ВЫХОД ЕСТЬ!
+      playlist_name: Podcast
+    - channel_id: UCT_AKsYn-zjTC12CjCyp3dw
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Arkadiy Gershman
+      playlist_name: Podcast
+    - channel_id: UC4Cap1xVy2waDXfzM5ka6lg
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Простые числа
+      playlist_name: Podcast
+    - channel_id: UCMrD1wosgsUpu3AE7IlIjZQ
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Вселенная Плюс
+      playlist_name: Podcast
+    - channel_id: UCQ_LYRUJzBfh-mvU14xCNMw
+      playlist_id: PLfFRwYQfcR_SnizyA6lz4L7DnwBZS3W7M
+      channel_name: Вестник Бури
+      playlist_name: Podcast
