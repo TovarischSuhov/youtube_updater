@@ -1,0 +1,72 @@
+# Syncs new YouTube uploads into configured playlists on a schedule.
+#
+# One-time setup (local):
+#   1. Run the binary once to complete the OAuth consent flow, producing a
+#      token.json that contains a long-lived refresh token.
+#   2. Add two repository secrets (Settings → Secrets and variables → Actions):
+#        CLIENT_SECRETS_JSON — full contents of client_secrets.json
+#        TOKEN_JSON          — full contents of token.json
+#   3. Commit config.yaml with your channel→playlist pairs (added via
+#      --add-channel/--add-playlist). It carries no secrets and is tracked.
+#
+# state.json (the last-seen watermark per channel) is cached across runs so the
+# syncer advances its cursor instead of re-seeding — without it every run would
+# see every channel as new and add nothing. token.json is NOT persisted: the
+# refresh token in the secret is long-lived and reused each run; an expired
+# access token is refreshed in-process by the youtube package.
+name: Sync YouTube playlists
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily, 06:17 UTC
+  workflow_dispatch: {} # manual "Run workflow" button
+
+# Queue runs instead of racing on shared cached state. A scheduled run while one
+# is in flight waits; manual dispatch likewise.
+concurrency:
+  group: youtube-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache: true
+
+      # Restore the prior run's watermark. The lookup key is unique per run, so it
+      # always misses on its own and falls back to the newest yt-state- entry.
+      - name: Restore last-seen state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: yt-state-${{ github.run_id }}
+          restore-keys: yt-state-
+
+      - name: Write OAuth credentials
+        run: |
+          printf '%s' "$CLIENT_SECRETS_JSON" > client_secrets.json
+          printf '%s' "$TOKEN_JSON" > token.json
+          test -s client_secrets.json || { echo "CLIENT_SECRETS_JSON secret is empty or unset"; exit 1; }
+          test -s token.json || { echo "TOKEN_JSON secret is empty or unset"; exit 1; }
+        env:
+          CLIENT_SECRETS_JSON: ${{ secrets.CLIENT_SECRETS_JSON }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+
+      # Runs from repo root so the binary finds config.yaml, client_secrets.json,
+      # token.json, and state.json via their default relative paths.
+      - name: Sync
+        run: go run ./cmd
+
+      # Persist the updated watermark for the next run. Guarded on the file
+      # existing so a crashed run (which never wrote state.json) is a no-op.
+      - name: Save last-seen state
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: yt-state-${{ github.run_id }}

@@ -85,6 +85,48 @@ Annotations: |
 
       Requirements:
       - The playlist must be public or owned by the user, otherwise `err`
+    "ResolveChannelRef(ref: ChannelRef) -> id:string, err:error": |
+      Resolve a channel reference to a concrete channel ID.
+
+      `ref`: a parsed channel reference (id / handle / custom / user)
+      `id`: the resolved channel ID
+      `err`: error if the slug cannot be resolved
+
+      A bare ID is returned unchanged with no API call. Handle, custom, and
+      username slugs are resolved via `youtube-data-api` (channels.list
+      forHandle, then forUsername as a legacy fallback). Returns a
+      channel-not-found error if neither matches.
+
+"ChannelRef()":
+  location: parse.go
+  annotations: |
+    A parsed channel reference: either a concrete channel ID or a slug (handle,
+    custom, or username) that still needs API resolution.
+  properties:
+    "Kind -> string": |
+      One of "id", "handle", "custom", "user".
+    "ID -> string": |
+      The channel ID; set when Kind == "id".
+    "Slug -> string": |
+      The handle/custom/username slug with no leading @; set when Kind != "id".
+  methods:
+    "IsID() -> ok:bool": |
+      Reports whether the reference is already a concrete channel ID and needs
+      no API lookup.
+
+"ParsePlaylistID(s: string) -> id:string, ok:bool":
+  location: parse.go
+  annotations: |
+    Extract a playlist ID from a bare ID or any YouTube URL carrying a ?list=
+    query parameter (a playlist or watch URL). Returns ok=false when no
+    ID-shaped value is found.
+
+"ParseChannelRef(s: string) -> ref:ChannelRef, ok:bool":
+  location: parse.go
+  annotations: |
+    Classify a channel reference from a bare UC ID or a YouTube URL into a
+    ChannelRef (id / handle / custom / user). Returns ok=false for watch URLs,
+    garbage, or empty input.
 
 ---
 

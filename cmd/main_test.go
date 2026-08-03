@@ -165,6 +165,35 @@ func TestRunRemove_RemovesPairAndSaves(t *testing.T) {
 	}
 }
 
+func TestRunRemove_AcceptsChannelURL(t *testing.T) {
+	const ch = "UC1234567890abcdefghijkl"
+	path := writeConfig(t, []config.ChannelMapping{
+		{ChannelID: ch, PlaylistID: "PLa"},
+		{ChannelID: "UCb", PlaylistID: "PLb"},
+	})
+	if err := RunRemove(path, "https://www.youtube.com/channel/"+ch); err != nil {
+		t.Fatalf("RunRemove error: %v", err)
+	}
+	got, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ChannelID != "UCb" {
+		t.Fatalf("expected the /channel/ URL to remove %s, got %+v", ch, got)
+	}
+}
+
+func TestRunRemove_RejectsHandleURL(t *testing.T) {
+	path := writeConfig(t, []config.ChannelMapping{{ChannelID: "UC1234567890abcdefghijkl", PlaylistID: "PLa"}})
+	if err := RunRemove(path, "https://www.youtube.com/@SomeHandle"); err == nil {
+		t.Fatal("expected error for handle URL, got nil")
+	}
+	got, _ := config.LoadConfig(path)
+	if len(got) != 1 {
+		t.Fatalf("config should be unchanged after a rejected remove, got %+v", got)
+	}
+}
+
 func writeConfig(t *testing.T, mappings []config.ChannelMapping) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

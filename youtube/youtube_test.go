@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"golang.org/x/oauth2"
 	"google.golang.org/api/option"
 	youtubev3 "google.golang.org/api/youtube/v3"
 )
@@ -22,6 +25,7 @@ func TestContractSurface(t *testing.T) {
 	var _ func(string) ([]Video, error) = y.ListUploads
 	var _ func(string, string) (string, error) = y.AddToPlaylist
 	var _ func(string, string) (string, string, error) = y.ResolveNames
+	var _ func(ChannelRef) (string, error) = y.ResolveChannelRef
 }
 
 func newTestYouTube(t *testing.T, h http.HandlerFunc) *YouTube {
@@ -158,5 +162,128 @@ func TestResolveNames_PlaylistNotFound(t *testing.T) {
 	})
 	if _, _, err := yt.ResolveNames("UCa", "PLx"); err == nil {
 		t.Fatal("expected playlist-not-found error, got nil")
+	}
+}
+
+// TestLoadToken_ExpiredAccessTokenWithRefreshToken_LoadsOK covers the non-
+// interactive case (e.g. scheduled CI): the cached access token has expired but
+// a refresh token is present, so loadToken must return the token rather than
+// fall back to the interactive consent flow.
+func TestLoadToken_ExpiredAccessTokenWithRefreshToken_LoadsOK(t *testing.T) {
+	expired := &oauth2.Token{
+		AccessToken:  "expired-access",
+		RefreshToken: "refresh-xyz",
+		TokenType:    "Bearer",
+		Expiry:       time.Now().Add(-time.Hour),
+	}
+	path := filepath.Join(t.TempDir(), "token.json")
+	if err := saveToken(path, expired); err != nil {
+		t.Fatalf("saveToken: %v", err)
+	}
+	got, err := loadToken(path)
+	if err != nil {
+		t.Fatalf("loadToken error: %v", err)
+	}
+	if got.RefreshToken != "refresh-xyz" {
+		t.Errorf("refresh token = %q, want refresh-xyz", got.RefreshToken)
+	}
+}
+
+// TestLoadToken_ExpiredAccessTokenNoRefreshToken_ReturnsError confirms a stored
+// token with no refresh path is rejected — there is nothing to recover it from.
+func TestLoadToken_ExpiredAccessTokenNoRefreshToken_ReturnsError(t *testing.T) {
+	expired := &oauth2.Token{
+		AccessToken: "expired-access",
+		TokenType:   "Bearer",
+		Expiry:      time.Now().Add(-time.Hour),
+	}
+	path := filepath.Join(t.TempDir(), "token.json")
+	if err := saveToken(path, expired); err != nil {
+		t.Fatalf("saveToken: %v", err)
+	}
+	if _, err := loadToken(path); err == nil {
+		t.Fatal("expected error for expired token without refresh token, got nil")
+	}
+}
+
+// TestResolveChannelRef_IDPassthrough_NoServerHit verifies a bare ID is returned
+// unchanged without touching the API.
+func TestResolveChannelRef_IDPassthrough_NoServerHit(t *testing.T) {
+	const ch = "UC1234567890abcdefghijkl"
+	called := false
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	got, err := yt.ResolveChannelRef(ChannelRef{Kind: "id", ID: ch})
+	if err != nil {
+		t.Fatalf("ResolveChannelRef error: %v", err)
+	}
+	if got != ch {
+		t.Errorf("got %q, want the same ID back", got)
+	}
+	if called {
+		t.Error("API was called for an ID ref; expected a pure passthrough")
+	}
+}
+
+// TestResolveChannelRef_HandleResolvedViaForHandle verifies a handle slug is
+// resolved through channels.list?forHandle.
+func TestResolveChannelRef_HandleResolvedViaForHandle(t *testing.T) {
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/youtube/v3/channels" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("forHandle") == "SomeHandle" {
+			fmt.Fprint(w, `{"items":[{"id":"UC_RESOLVED_FROM_HANDLE"}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"items":[]}`)
+	})
+	got, err := yt.ResolveChannelRef(ChannelRef{Kind: "handle", Slug: "SomeHandle"})
+	if err != nil {
+		t.Fatalf("ResolveChannelRef error: %v", err)
+	}
+	if got != "UC_RESOLVED_FROM_HANDLE" {
+		t.Errorf("got %q, want UC_RESOLVED_FROM_HANDLE", got)
+	}
+}
+
+// TestResolveChannelRef_FallsBackToForUsername verifies that when forHandle finds
+// nothing, the lookup retries via forUsername (covers legacy /user/ names).
+func TestResolveChannelRef_FallsBackToForUsername(t *testing.T) {
+	calls := 0
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("forHandle") != "" {
+			fmt.Fprint(w, `{"items":[]}`) // handle miss → fall back
+			return
+		}
+		if r.URL.Query().Get("forUsername") == "LegacyName" {
+			fmt.Fprint(w, `{"items":[{"id":"UC_FROM_USERNAME"}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"items":[]}`)
+	})
+	got, err := yt.ResolveChannelRef(ChannelRef{Kind: "user", Slug: "LegacyName"})
+	if err != nil {
+		t.Fatalf("ResolveChannelRef error: %v", err)
+	}
+	if got != "UC_FROM_USERNAME" {
+		t.Errorf("got %q, want UC_FROM_USERNAME", got)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 API calls (forHandle then forUsername), got %d", calls)
+	}
+}
+
+// TestResolveChannelRef_NotFound_ReturnsError verifies both lookups missing
+// surfaces as an error.
+func TestResolveChannelRef_NotFound_ReturnsError(t *testing.T) {
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[]}`)
+	})
+	if _, err := yt.ResolveChannelRef(ChannelRef{Kind: "handle", Slug: "Ghost"}); err == nil {
+		t.Fatal("expected error for unresolved handle, got nil")
 	}
 }

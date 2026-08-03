@@ -1,0 +1,17 @@
+language: golang
+image: qarium/goga-golang-1.24:1.0
+build:
+  task_executor:
+    agent: claude
+pipeline:
+  agent: claude
+codemanifest:
+  usages:
+    youtube-data-api: .goga/usages/cooks/youtube-data-api.md
+    google-oauth2: .goga/usages/cooks/google-oauth2.md
+  annotations: |
+    Apply `youtube-data-api` for every interaction with the YouTube Data API v3
+    (resolving uploads playlists, enumerating uploads, inserting playlist items,
+    pagination, and quota accounting).
+    Apply `google-oauth2` for the OAuth2 desktop credential flow and local token
+    caching used by the YouTube service client.
