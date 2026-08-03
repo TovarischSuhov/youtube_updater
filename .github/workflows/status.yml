@@ -1,0 +1,107 @@
+# Manual status check: lists configured channel→playlist pairs, runs a sync, and
+# MARKS any channel that failed to update — without failing the run. Triggered by
+# hand from the Actions tab; there is no schedule (see sync.yml for the daily one).
+#
+# How "marking" works: the sync always exits 0 (best-effort, like sync.yml). The
+# program logs one line per channel with an err= field; the "Mark…" step reads
+# that log, picks out the channels whose err is not <nil>, and surfaces them as
+# (non-failing) ::warning:: annotations plus a "Sync status" section in the run
+# summary. The job stays green; you just see which channels need attention.
+#
+# This performs a REAL sync (it advances playlists and the cached state), so it
+# doubles as an on-demand sync. For a read-only preview, add --dry-run to the
+# Sync step — marking still works, since channel API errors are logged either way.
+#
+# Same setup as sync.yml: CLIENT_SECRETS_JSON and TOKEN_JSON repo secrets, and a
+# committed config.yaml with your pairs.
+name: Sync status (manual)
+
+on:
+  workflow_dispatch: {} # manual "Run workflow" button only
+
+# Shares the sync.yml concurrency group so a manual run never overlaps a
+# scheduled one (both touch the same cached state.json).
+concurrency:
+  group: youtube-sync
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache: true
+
+      - name: Restore last-seen state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: yt-state-${{ github.run_id }}
+          restore-keys: yt-state-
+
+      - name: Write OAuth credentials
+        run: |
+          printf '%s' "$CLIENT_SECRETS_JSON" > client_secrets.json
+          printf '%s' "$TOKEN_JSON" > token.json
+          test -s client_secrets.json || { echo "CLIENT_SECRETS_JSON secret is empty or unset"; exit 1; }
+          test -s token.json || { echo "TOKEN_JSON secret is empty or unset"; exit 1; }
+        env:
+          CLIENT_SECRETS_JSON: ${{ secrets.CLIENT_SECRETS_JSON }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+
+      - name: List configured pairs
+        run: |
+          {
+            echo "## Configured channel → playlist pairs"
+            echo '```'
+            go run ./cmd --list
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Real sync (best-effort, exit 0 on per-channel errors). tee captures the
+      # log for the marking step; pipefail still propagates a hard failure.
+      - name: Sync
+        run: go run ./cmd 2>&1 | tee /tmp/sync.log
+
+      # Mark channels that failed to update — does NOT fail the job.
+      - name: Mark channels that failed to update
+        if: always()
+        run: |
+          if [ ! -f /tmp/sync.log ]; then
+            {
+              echo "## Sync status"
+              echo "ℹ️ Sync did not run (an earlier step failed); no channel status to report."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # One slog line per channel: "... msg=channel channel_id=UC… … err=<nil>".
+          # Successful channels have err=<nil>; failures have err=<message>.
+          failed=$(grep 'msg=channel' /tmp/sync.log | grep -v 'err=<nil>' || true)
+          {
+            echo "## Sync status"
+            if [ -n "$failed" ]; then
+              echo "⚠️ Channel(s) that failed to update this run:"
+              echo '```'
+              echo "$failed"
+              echo '```'
+            else
+              echo "✅ All configured channels updated successfully (or seeded; no new videos to add)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Visible, non-failing warning annotation per failed channel.
+          printf '%s\n' "$failed" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            cid=$(printf '%s' "$line" | grep -oE 'channel_id=[^ ]+' | cut -d= -f2)
+            [ -n "$cid" ] && echo "::warning::channel $cid failed to update"
+          done
+
+      - name: Save last-seen state
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: yt-state-${{ github.run_id }}
