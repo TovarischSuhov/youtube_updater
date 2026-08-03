@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -172,6 +173,46 @@ func (y *YouTube) ResolveNames(channelID, playlistID string) (string, string, er
 	return channelName, playlistName, nil
 }
 
+// ResolveChannelRef resolves a channel reference to a concrete channel ID. A bare
+// ID is returned unchanged with no API call. Handle, custom, and username slugs
+// are resolved via channels.list — forHandle first (the modern default, which
+// also resolves most legacy /c/ custom URLs), then forUsername as a fallback for
+// /user/ usernames. Returns a channelNotFoundError if neither matches.
+func (y *YouTube) ResolveChannelRef(ref ChannelRef) (string, error) {
+	if ref.IsID() {
+		return ref.ID, nil
+	}
+	slug := strings.TrimPrefix(strings.TrimSpace(ref.Slug), "@")
+	if slug == "" {
+		return "", fmt.Errorf("youtube: empty channel slug")
+	}
+	var id string
+	err := withRetry("resolve channel ref", func() error {
+		resp, err := y.svc.Channels.List([]string{"id"}).ForHandle(slug).Do()
+		if err != nil {
+			return err
+		}
+		if len(resp.Items) > 0 {
+			id = resp.Items[0].Id
+			return nil
+		}
+		// Fallback for legacy /user/ usernames and older custom URLs.
+		resp, err = y.svc.Channels.List([]string{"id"}).ForUsername(slug).Do()
+		if err != nil {
+			return err
+		}
+		if len(resp.Items) == 0 {
+			return &channelNotFoundError{id: slug}
+		}
+		id = resp.Items[0].Id
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // --- OAuth2 (per google-oauth2 usage) ---
 
 func configFromSecrets(secretsPath, redirectURL string) (*oauth2.Config, error) {
@@ -250,7 +291,13 @@ func loadToken(path string) (*oauth2.Token, error) {
 	if err := json.Unmarshal(b, &tok); err != nil {
 		return nil, err
 	}
-	if !tok.Valid() {
+	// An expired access token is still usable when a refresh token is present:
+	// config.TokenSource will mint a fresh access token from it on demand. This
+	// is what lets non-interactive runs (e.g. scheduled CI) work — by run time
+	// the cached access token has almost always expired, but the refresh token
+	// is long-lived. Only reject a stored token when it can neither be used nor
+	// refreshed.
+	if tok.RefreshToken == "" && !tok.Valid() {
 		return nil, errors.New("youtube: stored token invalid")
 	}
 	return &tok, nil

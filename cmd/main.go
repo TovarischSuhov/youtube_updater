@@ -105,16 +105,33 @@ func Run(configPath, secretsPath, tokenPath, statePath, redirectURL string, dryR
 	return nil
 }
 
-// RunAdd adds (or updates) a channel→playlist pair: it fetches the channel and
-// playlist names from the API, upserts the pair, and persists the config.
-func RunAdd(configPath, secretsPath, tokenPath, redirectURL, channelID, playlistID string) error {
+// RunAdd adds (or updates) a channel→playlist pair: channel and playlist inputs
+// accept a bare ID or a YouTube URL (@handle and /c/ / /user/ URLs are resolved
+// to a channel ID via the API). It fetches the channel and playlist names,
+// upserts the pair, and persists the config.
+func RunAdd(configPath, secretsPath, tokenPath, redirectURL, channelInput, playlistInput string) error {
 	mappings, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	// Parse the playlist first (pure, no API) for a fast, clear error.
+	playlistID, ok := youtube.ParsePlaylistID(playlistInput)
+	if !ok {
+		return fmt.Errorf("parse playlist %q: expected a playlist ID or a YouTube URL with ?list=", playlistInput)
+	}
 	yt, err := youtube.NewYouTube(secretsPath, tokenPath, redirectURL)
 	if err != nil {
 		return fmt.Errorf("youtube: %w", err)
+	}
+	// Resolve the channel: bare IDs and /channel/ URLs need no API; @handle,
+	// /c/, and /user/ slugs are resolved via the API.
+	channelRef, ok := youtube.ParseChannelRef(channelInput)
+	if !ok {
+		return fmt.Errorf("parse channel %q: expected a channel ID or a YouTube channel/@handle/c/user URL", channelInput)
+	}
+	channelID, err := yt.ResolveChannelRef(channelRef)
+	if err != nil {
+		return fmt.Errorf("resolve channel: %w", err)
 	}
 	channelName, playlistName, err := yt.ResolveNames(channelID, playlistID)
 	if err != nil {
@@ -132,7 +149,18 @@ func RunAdd(configPath, secretsPath, tokenPath, redirectURL, channelID, playlist
 }
 
 // RunRemove drops the pair for the given channel and persists the config. Offline.
-func RunRemove(configPath, channelID string) error {
+// The channel input may be a bare ID (matched as-is against stored config) or a
+// /channel/UC… URL. Handle, custom, and user URLs are rejected — they need the
+// API to resolve; run --list to find the stored channel ID.
+func RunRemove(configPath, channelInput string) error {
+	channelID := strings.TrimSpace(channelInput)
+	if strings.Contains(channelInput, "youtube.com") || strings.Contains(channelInput, "youtu.be") {
+		ref, ok := youtube.ParseChannelRef(channelInput)
+		if !ok || !ref.IsID() {
+			return fmt.Errorf("remove channel %q: pass the channel ID or a /channel/UC… URL (handles need the API; run --list for the ID)", channelInput)
+		}
+		channelID = ref.ID
+	}
 	mappings, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
