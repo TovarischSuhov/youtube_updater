@@ -1,6 +1,7 @@
 Usages:
   youtube-data-api: .goga/usages/cooks/youtube-data-api.md
   google-oauth2: .goga/usages/cooks/google-oauth2.md
+  youtube-shorts-detection: .goga/usages/cooks/youtube-shorts-detection.md
 
 Annotations: |
   This cell is the Google integration facade: it owns OAuth2 credentials and all
@@ -9,7 +10,9 @@ Annotations: |
 
   Use `google-oauth2` to obtain the authenticated client and to cache and refresh
   the token during construction.
-  Use `youtube-data-api` for every API call.
+  Use `youtube-data-api` for every Data API call.
+  Use `youtube-shorts-detection` to classify Shorts; it probes youtube.com directly
+  (unauthenticated) and is distinct from the OAuth Data API.
   Return errors following the (result, error) idiom.
 
 ---
@@ -38,6 +41,8 @@ Annotations: |
        (use the cached token at `tokenPath` if valid, otherwise run the consent
        flow and persist the token)
     2. Build the YouTube service client
+    3. Build an unauthenticated probe client for Shorts detection (see
+       `youtube-shorts-detection`)
 
     Requirements:
     - The constructed facade is safe for sequential use across one sync pass
@@ -67,11 +72,22 @@ Annotations: |
       `regular`: the subset that are regular videos (Shorts/streams removed)
       `err`: error if classification fails
 
-      A Short is a video whose duration is ≤ 60s; a stream is any video carrying
-      liveStreamingDetails (live, ended, or premiere). Classify via
-      `youtube-data-api` (videos.list contentDetails + liveStreamingDetails),
-      batched at ≤50 ids per call. A video absent from the response (deleted or
-      made private) is dropped; one whose duration fails to parse is kept.
+      Algorithm:
+      1. Fetch duration and live-stream details via `youtube-data-api`
+         (videos.list contentDetails + liveStreamingDetails), batched at ≤50 ids
+         per call
+      2. Drop any video carrying liveStreamingDetails (live, ended, or premiere)
+      3. For each remaining video, classify it as a Short via
+         `youtube-shorts-detection` (probe of /shorts/{id}); drop Shorts
+      4. If the probe is inconclusive, fall back to duration: treat a video with
+         duration ≤ 180s as a Short
+
+      Requirements:
+      - A video absent from the videos.list response (deleted or made private) is dropped
+      - A video whose duration fails to parse is kept (not dropped on a guess)
+
+      Constraints:
+      - The probe failure path must never abort the channel; it falls back to duration
     "AddToPlaylist(playlistID: string, videoID: string) -> itemID:string, err:error": |
       Insert a video into a playlist.
 

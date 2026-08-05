@@ -41,6 +41,28 @@ func newTestYouTube(t *testing.T, h http.HandlerFunc) *YouTube {
 	return newWithService(svc)
 }
 
+// newTestYouTubeWithShorts builds a facade whose Data API service and Shorts probe
+// both point at httptest servers, so the HEAD classification path is exercised
+// without real network calls. The probe client does not follow redirects (mirrors
+// defaultShortsClient). dataHandler serves /youtube/v3/*; shortsHandler serves
+// /shorts/{id}.
+func newTestYouTubeWithShorts(t *testing.T, dataHandler, shortsHandler http.HandlerFunc) *YouTube {
+	t.Helper()
+	dataTS := httptest.NewServer(dataHandler)
+	t.Cleanup(dataTS.Close)
+	shortsTS := httptest.NewServer(shortsHandler)
+	t.Cleanup(shortsTS.Close)
+	svc, err := youtubev3.NewService(context.Background(), option.WithEndpoint(dataTS.URL), option.WithHTTPClient(dataTS.Client()))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	shortsClient := shortsTS.Client()
+	shortsClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return newWithShorts(svc, shortsTS.URL, shortsClient)
+}
+
 // videoIDs returns every id from a /videos list request. The google-api client
 // sends multiple ids as repeated id= query params, so Query().Get would only see
 // the first; this also tolerates a comma-joined single value.
@@ -50,6 +72,29 @@ func videoIDs(r *http.Request) []string {
 		ids = append(ids, strings.Split(v, ",")...)
 	}
 	return ids
+}
+
+// writeVideosList writes a /youtube/v3/videos response. durFor maps id→ISO-8601
+// duration; an id absent from durFor is omitted from the response (simulating a
+// deleted/private video); stream marks ids carrying liveStreamingDetails.
+func writeVideosList(w http.ResponseWriter, r *http.Request, durFor map[string]string, stream map[string]bool) {
+	if r.URL.Path != "/youtube/v3/videos" {
+		http.NotFound(w, r)
+		return
+	}
+	var items []string
+	for _, id := range videoIDs(r) {
+		dur, ok := durFor[id]
+		if !ok {
+			continue // absent from response ⇒ dropped by the classifier
+		}
+		if stream[id] {
+			items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":%q},"liveStreamingDetails":{"actualStartTime":"2026-01-01T00:00:00Z"}}`, id, dur))
+			continue
+		}
+		items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":%q}}`, id, dur))
+	}
+	fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
 }
 
 func TestResolveUploads_ReturnsUploadsPlaylistID(t *testing.T) {
@@ -329,25 +374,19 @@ func TestParseISODuration(t *testing.T) {
 }
 
 func TestFilterRegularVideos_DropsShortsAndStreams(t *testing.T) {
-	kind := map[string]string{"v_regular": "", "v_short": "short", "v_stream": "stream"}
-	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/youtube/v3/videos" {
-			http.NotFound(w, r)
-			return
-		}
-		var items []string
-		for _, id := range videoIDs(r) {
-			switch kind[id] {
-			case "short":
-				items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT30S"}}`, id))
-			case "stream":
-				items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT1H"},"liveStreamingDetails":{"actualStartTime":"2026-01-01T00:00:00Z"}}`, id))
-			default:
-				items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT10M"}}`, id))
+	durFor := map[string]string{"v_regular": "PT10M", "v_short": "PT30S", "v_stream": "PT1H"}
+	stream := map[string]bool{"v_stream": true}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, stream) },
+		func(w http.ResponseWriter, r *http.Request) {
+			// 200 ⇒ Short; 3xx ⇒ regular.
+			if strings.TrimPrefix(r.URL.Path, "/shorts/") == "v_short" {
+				w.WriteHeader(http.StatusOK)
+				return
 			}
-		}
-		fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
-	})
+			http.Redirect(w, r, "/watch", http.StatusFound)
+		},
+	)
 	in := []Video{
 		{ID: "v_regular", PublishedAt: "2026-08-01T10:00:00Z"},
 		{ID: "v_short", PublishedAt: "2026-08-01T11:00:00Z"},
@@ -363,14 +402,14 @@ func TestFilterRegularVideos_DropsShortsAndStreams(t *testing.T) {
 }
 
 func TestFilterRegularVideos_PreservesOrder(t *testing.T) {
-	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
-		// All regular; verifies newest-first input order is preserved.
-		var items []string
-		for _, id := range videoIDs(r) {
-			items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT5M"}}`, id))
-		}
-		fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
-	})
+	durFor := map[string]string{"a": "PT5M", "b": "PT5M", "c": "PT5M"}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		// All regular (3xx) — verifies newest-first input order is preserved.
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/watch", http.StatusFound)
+		},
+	)
 	in := []Video{
 		{ID: "a", PublishedAt: "2026-08-01T03:00:00Z"},
 		{ID: "b", PublishedAt: "2026-08-01T02:00:00Z"},
@@ -382,6 +421,143 @@ func TestFilterRegularVideos_PreservesOrder(t *testing.T) {
 	}
 	if len(got) != 3 || got[0].ID != "a" || got[2].ID != "c" {
 		t.Errorf("order not preserved: %+v", got)
+	}
+}
+
+// TestFilterRegularVideos_DropsShortViaProbe verifies a probe 200 drops a video
+// even when its duration is long (so only the probe, not the fallback, drops it).
+func TestFilterRegularVideos_DropsShortViaProbe(t *testing.T) {
+	durFor := map[string]string{"v_shortprobe": "PT20M", "v_long": "PT20M"}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		func(w http.ResponseWriter, r *http.Request) {
+			if strings.TrimPrefix(r.URL.Path, "/shorts/") == "v_shortprobe" {
+				w.WriteHeader(http.StatusOK) // 200 ⇒ Short
+				return
+			}
+			http.Redirect(w, r, "/watch", http.StatusFound) // 3xx ⇒ regular
+		},
+	)
+	in := []Video{
+		{ID: "v_shortprobe", PublishedAt: "2026-08-01T10:00:00Z"},
+		{ID: "v_long", PublishedAt: "2026-08-01T09:00:00Z"},
+	}
+	got, err := yt.FilterRegularVideos(in)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "v_long" {
+		t.Errorf("got %+v, want only [v_long] (probe 200 ⇒ Short dropped)", got)
+	}
+}
+
+// TestFilterRegularVideos_DropsStream verifies a live stream is dropped before the
+// probe is ever attempted.
+func TestFilterRegularVideos_DropsStream(t *testing.T) {
+	probeHits := 0
+	durFor := map[string]string{"v_stream": "PT1H"}
+	stream := map[string]bool{"v_stream": true}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, stream) },
+		func(w http.ResponseWriter, r *http.Request) { probeHits++ },
+	)
+	got, err := yt.FilterRegularVideos([]Video{{ID: "v_stream", PublishedAt: "2026-08-01T10:00:00Z"}})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %+v, want stream dropped", got)
+	}
+	if probeHits != 0 {
+		t.Errorf("probe hit %d times, want 0 (streams dropped before probe)", probeHits)
+	}
+}
+
+// TestFilterRegularVideos_FallsBackToDurationOnProbeError verifies that an
+// inconclusive probe (5xx) falls back to duration: ≤180s dropped, >180s kept, and
+// the probe error is NOT propagated (FilterRegularVideos returns nil error).
+func TestFilterRegularVideos_FallsBackToDurationOnProbeError(t *testing.T) {
+	durFor := map[string]string{"v_le": "PT2M", "v_gt": "PT4M"} // 120s, 240s
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable) // 503 ⇒ inconclusive
+		},
+	)
+	in := []Video{
+		{ID: "v_le", PublishedAt: "2026-08-01T10:00:00Z"},
+		{ID: "v_gt", PublishedAt: "2026-08-01T09:00:00Z"},
+	}
+	got, err := yt.FilterRegularVideos(in)
+	if err != nil {
+		t.Fatalf("error: %v (probe error must not propagate)", err)
+	}
+	if len(got) != 1 || got[0].ID != "v_gt" {
+		t.Errorf("got %+v, want only [v_gt] (≤180s dropped via fallback, >180s kept)", got)
+	}
+}
+
+// TestFilterRegularVideos_ProbeErrorUnparseableDuration_Keeps verifies that on an
+// inconclusive probe with an unparseable duration, the video is kept (never guessed
+// away), matching the long-standing defensive behaviour.
+func TestFilterRegularVideos_ProbeErrorUnparseableDuration_Keeps(t *testing.T) {
+	durFor := map[string]string{"v_x": ""} // empty ⇒ unparseable
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable) // 503 ⇒ inconclusive
+		},
+	)
+	got, err := yt.FilterRegularVideos([]Video{{ID: "v_x", PublishedAt: "2026-08-01T10:00:00Z"}})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "v_x" {
+		t.Errorf("got %+v, want [v_x] kept (probe error + unparseable duration ⇒ keep)", got)
+	}
+}
+
+// TestFilterRegularVideos_ProbeRedirectNotFollowed proves the redirect trap is
+// avoided: /shorts/{id} returns 302 to /watch which itself 200s. Because the probe
+// client does not follow redirects, the 302 reads as regular and the video is kept.
+func TestFilterRegularVideos_ProbeRedirectNotFollowed(t *testing.T) {
+	durFor := map[string]string{"v1": "PT10M"}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/watch" {
+				w.WriteHeader(http.StatusOK) // the trap: a followed redirect would land here
+				return
+			}
+			http.Redirect(w, r, "/watch", http.StatusFound) // 302
+		},
+	)
+	got, err := yt.FilterRegularVideos([]Video{{ID: "v1", PublishedAt: "2026-08-01T10:00:00Z"}})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "v1" {
+		t.Errorf("got %+v, want [v1] kept (302 must read as regular, not followed to 200)", got)
+	}
+}
+
+// TestFilterRegularVideos_VideoAbsentInList_Dropped verifies a video present in the
+// input but missing from the videos.list response is dropped, with no probe.
+func TestFilterRegularVideos_VideoAbsentInList_Dropped(t *testing.T) {
+	probeHits := 0
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, nil, nil) }, // no items
+		func(w http.ResponseWriter, r *http.Request) { probeHits++ },
+	)
+	got, err := yt.FilterRegularVideos([]Video{{ID: "v_ghost", PublishedAt: "2026-08-01T10:00:00Z"}})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %+v, want [] (absent from list ⇒ dropped)", got)
+	}
+	if probeHits != 0 {
+		t.Errorf("probe hit %d times, want 0 (absent video never probed)", probeHits)
 	}
 }
 

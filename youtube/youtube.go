@@ -37,13 +37,24 @@ type Video struct {
 
 // YouTube is the facade over Google credentials and the YouTube Data API v3.
 type YouTube struct {
-	svc *youtubev3.Service
+	svc        *youtubev3.Service
+	shortsHTTP *http.Client // unauthenticated, redirect-blocking Shorts probe client
+	shortsBase string       // probe origin (youtube.com); overridable in tests
+}
+
+// newWithShorts builds a facade from an already-constructed service plus an
+// explicit Shorts-probe origin and client. Production callers use newWithService
+// or NewYouTube, which supply the defaults; tests pass an httptest origin/client
+// so the probe is exercised without real network calls.
+func newWithShorts(svc *youtubev3.Service, shortsBase string, shortsHTTP *http.Client) *YouTube {
+	return &YouTube{svc: svc, shortsBase: shortsBase, shortsHTTP: shortsHTTP}
 }
 
 // newWithService builds a facade from an already-constructed service (used in
-// tests to point the service at an httptest server).
+// tests to point the service at an httptest server), wiring the default
+// Shorts-probe origin and client.
 func newWithService(svc *youtubev3.Service) *YouTube {
-	return &YouTube{svc: svc}
+	return newWithShorts(svc, defaultShortsBase, defaultShortsClient())
 }
 
 // NewYouTube constructs the facade: it obtains an authenticated HTTP client via
@@ -66,7 +77,7 @@ func NewYouTube(secretsPath, tokenPath, redirectURL string) (*YouTube, error) {
 	if err != nil {
 		return nil, fmt.Errorf("youtube: build service: %w", err)
 	}
-	return &YouTube{svc: svc}, nil
+	return newWithShorts(svc, defaultShortsBase, defaultShortsClient()), nil
 }
 
 // ResolveUploads resolves a channel's uploads playlist identifier.
@@ -112,19 +123,45 @@ func (y *YouTube) ListUploads(uploadsPlaylistID string) ([]Video, error) {
 	return videos, nil
 }
 
-// shortMaxDuration is the upper bound for a YouTube Short: videos at or below 60s
-// are treated as Shorts and excluded from sync.
-const shortMaxDuration = 60 * time.Second
+// defaultShortsBase is the web origin probed to classify Shorts (unauthenticated
+// and unofficial — see the youtube-shorts-detection usage). It is NOT the Data API.
+const defaultShortsBase = "https://www.youtube.com"
 
-// FilterRegularVideos drops Shorts (duration ≤ shortMaxDuration) and live streams
-// (any video carrying liveStreamingDetails — live, ended, or premiere) from
-// videos, returning only regular long-form uploads in their original order.
+// defaultShortsClient builds the redirect-blocking client used by the Shorts probe.
+// It must NOT follow redirects: a non-Short answers /shorts/{id} with a 3xx to
+// /watch that ultimately 200s, so following it would classify every regular video
+// as a Short (the redirect trap in the youtube-shorts-detection usage).
+func defaultShortsClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: 10 * time.Second,
+	}
+}
+
+// shortMaxDuration is the FALLBACK Short cutoff, applied only when the HEAD probe
+// is inconclusive: videos at or below 180s (the current Shorts maximum) are
+// treated as Shorts. Coarse — it cannot separate a Short from a genuinely short
+// regular video — so the probe is the primary signal.
+const shortMaxDuration = 180 * time.Second
+
+// FilterRegularVideos drops Shorts and live streams from videos, returning only
+// regular long-form uploads in their original order.
 //
-// It classifies via videos.list (contentDetails for duration, liveStreamingDetails
-// for streams), batched at ≤50 ids per call. A video absent from the response
-// (deleted or made private between listing and classification) is dropped — it
-// cannot be added to a playlist anyway. A video whose duration fails to parse is
-// kept rather than silently dropped on an unrecognised format.
+// Algorithm:
+//  1. Fetch duration and live-stream details via videos.list (contentDetails +
+//     liveStreamingDetails), batched at ≤50 ids per call.
+//  2. Drop any video carrying liveStreamingDetails (live, ended, or premiere).
+//  3. For each remaining video, classify it as a Short via the unauthenticated
+//     HEAD /shorts/{id} probe (see youtube-shorts-detection); drop Shorts.
+//  4. If the probe is inconclusive, fall back to duration: treat a video with
+//     duration ≤ shortMaxDuration (180s) as a Short.
+//
+// A video absent from the videos.list response (deleted or made private between
+// listing and classification) is dropped. A video whose duration fails to parse is
+// kept rather than dropped on a guess. The probe-failure path never aborts
+// classification — it falls back to the duration rule.
 func (y *YouTube) FilterRegularVideos(videos []Video) ([]Video, error) {
 	if len(videos) == 0 {
 		return nil, nil
@@ -134,7 +171,15 @@ func (y *YouTube) FilterRegularVideos(videos []Video) ([]Video, error) {
 		ids[i] = v.ID
 	}
 
-	keep := make(map[string]bool, len(videos))
+	// Per-video metadata from videos.list: parsed duration (durOK=false when
+	// unrecognised) and a live-stream flag. Absent from this map ⇒ absent from the
+	// list response ⇒ dropped below.
+	type meta struct {
+		dur    time.Duration
+		durOK  bool
+		stream bool
+	}
+	metaByID := make(map[string]meta, len(videos))
 	for start := 0; start < len(ids); start += 50 {
 		batch := ids[start:min(start+50, len(ids))]
 		if err := withRetry("classify videos", func() error {
@@ -143,18 +188,11 @@ func (y *YouTube) FilterRegularVideos(videos []Video) ([]Video, error) {
 				return err
 			}
 			for _, it := range resp.Items {
-				d, ok := parseISODuration(it.ContentDetails.Duration)
-				if !ok {
-					keep[it.Id] = true // unrecognised format: don't drop on a guess
-					continue
+				m := meta{stream: it.LiveStreamingDetails != nil}
+				if d, ok := parseISODuration(it.ContentDetails.Duration); ok {
+					m.dur, m.durOK = d, true
 				}
-				if d <= shortMaxDuration {
-					continue // Short
-				}
-				if it.LiveStreamingDetails != nil {
-					continue // live stream / premiere
-				}
-				keep[it.Id] = true
+				metaByID[it.Id] = m
 			}
 			return nil
 		}); err != nil {
@@ -162,13 +200,59 @@ func (y *YouTube) FilterRegularVideos(videos []Video) ([]Video, error) {
 		}
 	}
 
-	out := make([]Video, 0, len(keep))
+	// Classify in input order so the result preserves newest-first ordering.
+	ctx := context.Background()
+	out := make([]Video, 0, len(videos))
 	for _, v := range videos {
-		if keep[v.ID] {
+		m, ok := metaByID[v.ID]
+		if !ok {
+			continue // deleted/private since listing: drop
+		}
+		if m.stream {
+			continue // live stream / premiere: drop
+		}
+		isShort, err := y.isShort(ctx, v.ID)
+		switch {
+		case err != nil:
+			// Probe inconclusive — fall back to the duration heuristic.
+			if m.durOK && m.dur <= shortMaxDuration {
+				continue
+			}
+			out = append(out, v) // unrecognised duration: keep (as today)
+		case isShort:
+			continue
+		default:
 			out = append(out, v)
 		}
 	}
 	return out, nil
+}
+
+// isShort reports whether id is a YouTube Short by issuing an unauthenticated
+// HEAD {shortsBase}/shorts/{id} and reading the immediate (pre-redirect) status.
+// A 200 response means Short; a 3xx (not followed) or 4xx means regular; a
+// transport error or 5xx means the probe is inconclusive, so the caller falls
+// back to the duration heuristic. The probe client does not follow redirects.
+func (y *YouTube) isShort(ctx context.Context, id string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, y.shortsBase+"/shorts/"+id, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := y.shortsHTTP.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return true, nil
+	case resp.StatusCode >= http.StatusInternalServerError:
+		// Server error — cannot classify; let the caller fall back to duration.
+		return false, fmt.Errorf("youtube: shorts probe inconclusive (status %d)", resp.StatusCode)
+	default:
+		// 3xx (redirect not followed) or 4xx ⇒ regular video.
+		return false, nil
+	}
 }
 
 // parseISODuration parses the subset of ISO 8601 durations YouTube returns for

@@ -299,10 +299,10 @@ func TestSyncAll_ChannelError_RecordsPerChannel_ContinuesOthers(t *testing.T) {
 // still advances past them so they are never re-scanned.
 func TestSyncAll_SkipsShortsAndStreams_AdvancesCursor(t *testing.T) {
 	vids := []youtube.Video{
-		{ID: "v_new", PublishedAt: "2026-07-27T15:00:00Z"},   // regular — should be added
-		{ID: "v_short", PublishedAt: "2026-07-27T14:00:00Z"}, // Short — skipped
+		{ID: "v_new", PublishedAt: "2026-07-27T15:00:00Z"},    // regular — should be added
+		{ID: "v_short", PublishedAt: "2026-07-27T14:00:00Z"},  // Short — skipped
 		{ID: "v_stream", PublishedAt: "2026-07-27T13:00:00Z"}, // live stream — skipped
-		{ID: "old", PublishedAt: "2026-07-27T09:00:00Z"},     // below watermark — not new
+		{ID: "old", PublishedAt: "2026-07-27T09:00:00Z"},      // below watermark — not new
 	}
 	kind := map[string]string{"v_short": "short", "v_stream": "stream"}
 	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, kind)

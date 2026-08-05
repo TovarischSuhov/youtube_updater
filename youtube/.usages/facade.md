@@ -25,9 +25,11 @@ writes the token to tokenPath; later constructions reuse and refresh it silently
 
     regular, err := youTube.FilterRegularVideos(videos) // []youtube.Video
 
-Removes Shorts (duration ≤ 60s) and live streams (any video with live streaming
-details) and returns the rest in input order. Pass the new-since-watermark subset
-so classification batches only what may be added.
+Removes Shorts and live streams (any video with live streaming details) and
+returns the rest in input order. Shorts are classified by probing
+`youtube.com/shorts/{id}` (HTTP 200 = Short); if that probe fails, the classifier
+falls back to duration ≤ 180s. Pass the new-since-watermark subset so
+classification batches only what may be added.
 
 ## Add a video to a playlist
 
