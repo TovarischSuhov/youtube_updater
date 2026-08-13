@@ -20,6 +20,7 @@ No module dependencies — standard library only:
 ```go
 import (
     "context"
+    "fmt"
     "net/http"
     "time"
 )
@@ -33,7 +34,9 @@ following it lands on a `200`, which would wrongly classify every regular video 
 Short. A Short responds with an immediate **200** on `/shorts/{id}` itself.
 
 ```go
-// A client that does NOT follow redirects — the redirect IS the "not a Short" signal.
+// A client that does NOT follow redirects — a regular video's /shorts/{id} 3xx
+// redirects to /watch, which 200s; following it would read every regular video
+// as a Short.
 shortsHTTP := &http.Client{
     CheckRedirect: func(req *http.Request, via []*http.Request) error {
         return http.ErrUseLastResponse
@@ -42,20 +45,39 @@ shortsHTTP := &http.Client{
 }
 ```
 
+## Why non-200 is not a "regular video" signal
+
+Treat every non-`200` response as **inconclusive** — never as evidence the video
+is regular. The `/shorts/{id}` endpoint is unofficial and returns non-`200` for
+reasons unrelated to Short-ness:
+
+- **Consent / region redirect (`3xx`)** — `youtube.com` may answer with a `302` to
+  `consent.google.com` or a locale domain depending on the caller's IP/region.
+- **Bot defense / rate limiting (`403`, `429`)** — repeated unauthenticated HEAD
+  requests from a datacenter IP (e.g. a CI runner) are routinely blocked.
+
+A real Short answers `200`; a real non-Short typically `3xx`-redirects to
+`/watch`. But a blocked or consent response is indistinguishable from a genuine
+redirect at the status-code level, so the only safe reading is: `200` ⇒ Short,
+anything else ⇒ fall back to duration. Reading a non-`200` as "regular" lets real
+Shorts leak through whenever the probe is blocked.
+
 ## Scenario 1 — Probe whether a video is a Short
 
-HEAD `/shorts/{id}`. Interpret the immediate (pre-redirect) status:
+HEAD `/shorts/{id}`. Interpret the immediate (pre-redirect) status. **Only `200`
+is a definitive Short signal**; every other outcome is inconclusive and the caller
+MUST fall back to the duration heuristic (Scenario 2):
 
-| Immediate status | Meaning       |
-|------------------|---------------|
-| `200`            | Short         |
-| `3xx`            | regular video |
-| `404`            | regular video |
-| transport error  | inconclusive  |
+| Immediate status          | Meaning      |
+|---------------------------|--------------|
+| `200`                     | Short        |
+| `3xx`, `4xx`, `5xx`       | inconclusive |
+| transport error / timeout | inconclusive |
 
 ```go
 // isShort reports whether id is a Short. err != nil means the probe was
-// inconclusive (network/timeout/5xx) — the caller must fall back to a heuristic.
+// inconclusive (ANY non-200 status, or a transport error) — the caller must
+// fall back to a heuristic. Only a 200 conclusively identifies a Short.
 func isShort(ctx context.Context, httpc *http.Client, base, id string) (bool, error) {
     req, err := http.NewRequestWithContext(ctx, http.MethodHead, base+"/shorts/"+id, nil)
     if err != nil {
@@ -69,15 +91,16 @@ func isShort(ctx context.Context, httpc *http.Client, base, id string) (bool, er
     if resp.StatusCode == http.StatusOK {
         return true, nil
     }
-    return false, nil
+    return false, fmt.Errorf("youtube: shorts probe inconclusive (status %d)", resp.StatusCode)
 }
 ```
 
 ## Scenario 2 — Duration fallback
 
-When the probe is inconclusive, classify by `contentDetails.duration` (parsed from
-ISO 8601 via the Data API, see `youtube-data-api`): a video **≤ 180s** is treated as a
-Short. 180s is the current Shorts maximum. This is coarse — it cannot tell a Short
+When the probe is inconclusive — any non-`200` status or a transport error (see
+Scenario 1) — classify by `contentDetails.duration` (parsed from ISO 8601 via the
+Data API, see `youtube-data-api`): a video **≤ 180s** is treated as a Short. 180s is
+the current Shorts maximum. This is coarse — it cannot tell a Short
 from a genuinely short regular video — so it is a safety net, not the primary signal.
 
 ## Reliability caveats

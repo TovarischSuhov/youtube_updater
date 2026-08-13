@@ -230,9 +230,11 @@ func (y *YouTube) FilterRegularVideos(videos []Video) ([]Video, error) {
 
 // isShort reports whether id is a YouTube Short by issuing an unauthenticated
 // HEAD {shortsBase}/shorts/{id} and reading the immediate (pre-redirect) status.
-// A 200 response means Short; a 3xx (not followed) or 4xx means regular; a
-// transport error or 5xx means the probe is inconclusive, so the caller falls
-// back to the duration heuristic. The probe client does not follow redirects.
+// A 200 response means Short; ANY other status (3xx consent/bot redirect, 4xx
+// block, 5xx) or a transport error is inconclusive, so the caller falls back to
+// the duration heuristic. Only a 200 reliably identifies a Short — the
+// unofficial endpoint returns non-200 for reasons unrelated to Short-ness (see
+// the youtube-shorts-detection usage). The probe client does not follow redirects.
 func (y *YouTube) isShort(ctx context.Context, id string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, y.shortsBase+"/shorts/"+id, nil)
 	if err != nil {
@@ -243,16 +245,10 @@ func (y *YouTube) isShort(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	if resp.StatusCode == http.StatusOK {
 		return true, nil
-	case resp.StatusCode >= http.StatusInternalServerError:
-		// Server error — cannot classify; let the caller fall back to duration.
-		return false, fmt.Errorf("youtube: shorts probe inconclusive (status %d)", resp.StatusCode)
-	default:
-		// 3xx (redirect not followed) or 4xx ⇒ regular video.
-		return false, nil
 	}
+	return false, fmt.Errorf("youtube: shorts probe inconclusive (status %d)", resp.StatusCode)
 }
 
 // parseISODuration parses the subset of ISO 8601 durations YouTube returns for

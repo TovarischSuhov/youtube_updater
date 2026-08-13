@@ -537,7 +537,57 @@ func TestFilterRegularVideos_ProbeRedirectNotFollowed(t *testing.T) {
 		t.Fatalf("error: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "v1" {
-		t.Errorf("got %+v, want [v1] kept (302 must read as regular, not followed to 200)", got)
+		t.Errorf("got %+v, want [v1] kept (302 ⇒ inconclusive ⇒ duration fallback; not followed to 200)", got)
+	}
+}
+
+// TestFilterRegularVideos_Probe3xx_FallsBackToDuration verifies that a probe 3xx
+// (e.g. a consent/bot redirect from a datacenter IP) is treated as inconclusive:
+// the classifier falls back to duration, dropping a ≤180s Short and keeping a
+// >180s regular video. Before fail-closed, the 3xx read as "regular" and the Short
+// leaked into the playlist.
+func TestFilterRegularVideos_Probe3xx_FallsBackToDuration(t *testing.T) {
+	durFor := map[string]string{"v_short": "PT55S", "v_long": "PT10M"}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/watch", http.StatusFound) // 3xx ⇒ inconclusive
+		},
+	)
+	in := []Video{
+		{ID: "v_short", PublishedAt: "2026-08-12T08:00:16Z"},
+		{ID: "v_long", PublishedAt: "2026-08-12T07:00:00Z"},
+	}
+	got, err := yt.FilterRegularVideos(in)
+	if err != nil {
+		t.Fatalf("FilterRegularVideos error: %v (probe inconclusive must not propagate)", err)
+	}
+	if len(got) != 1 || got[0].ID != "v_long" {
+		t.Errorf("got %+v, want only [v_long] (Short dropped via duration fallback on 3xx)", got)
+	}
+}
+
+// TestFilterRegularVideos_Probe4xx_FallsBackToDuration verifies that a probe 4xx
+// (e.g. 403/429 bot-block from a datacenter IP) is treated as inconclusive and
+// falls back to duration, exactly like a 3xx or 5xx.
+func TestFilterRegularVideos_Probe4xx_FallsBackToDuration(t *testing.T) {
+	durFor := map[string]string{"v_short": "PT55S", "v_long": "PT10M"}
+	yt := newTestYouTubeWithShorts(t,
+		func(w http.ResponseWriter, r *http.Request) { writeVideosList(w, r, durFor, nil) },
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden) // 4xx ⇒ inconclusive
+		},
+	)
+	in := []Video{
+		{ID: "v_short", PublishedAt: "2026-08-12T08:00:16Z"},
+		{ID: "v_long", PublishedAt: "2026-08-12T07:00:00Z"},
+	}
+	got, err := yt.FilterRegularVideos(in)
+	if err != nil {
+		t.Fatalf("FilterRegularVideos error: %v (probe inconclusive must not propagate)", err)
+	}
+	if len(got) != 1 || got[0].ID != "v_long" {
+		t.Errorf("got %+v, want only [v_long] (Short dropped via duration fallback on 4xx)", got)
 	}
 }
 

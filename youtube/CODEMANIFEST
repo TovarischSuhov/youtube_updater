@@ -78,15 +78,19 @@ Annotations: |
          per call
       2. Drop any video carrying liveStreamingDetails (live, ended, or premiere)
       3. For each remaining video, classify it as a Short via
-         `youtube-shorts-detection` (probe of /shorts/{id}); drop Shorts
-      4. If the probe is inconclusive, fall back to duration: treat a video with
-         duration ≤ 180s as a Short
+         `youtube-shorts-detection` (probe of /shorts/{id}): an HTTP 200 response
+         means Short and is dropped
+      4. Treat any other probe outcome (a non-200 status or a transport error) as
+         inconclusive and fall back to duration: a video with duration ≤ 180s is
+         treated as a Short
 
       Requirements:
       - A video absent from the videos.list response (deleted or made private) is dropped
       - A video whose duration fails to parse is kept (not dropped on a guess)
 
       Constraints:
+      - Only an HTTP 200 from the probe means Short; any other probe status MUST fall
+        back to duration and MUST NOT be classified as a regular video
       - The probe failure path must never abort the channel; it falls back to duration
     "AddToPlaylist(playlistID: string, videoID: string) -> itemID:string, err:error": |
       Insert a video into a playlist.
