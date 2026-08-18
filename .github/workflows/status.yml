@@ -60,14 +60,14 @@ jobs:
           {
             echo "## Configured channel → playlist pairs"
             echo '```'
-            go run ./cmd --list
+            make run ARGS="--list"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Real sync (best-effort, exit 0 on per-channel errors). tee captures the
       # log for the marking step; pipefail still propagates a hard failure.
       - name: Sync
-        run: go run ./cmd 2>&1 | tee /tmp/sync.log
+        run: make run 2>&1 | tee /tmp/sync.log
 
       # Mark channels that failed to update — does NOT fail the job.
       - name: Mark channels that failed to update

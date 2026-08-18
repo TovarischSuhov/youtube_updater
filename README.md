@@ -43,8 +43,24 @@ your playlists) — already baked into the tool.
 ### 2. Build
 
 ```sh
-go build -o youtube-updater ./cmd
-# or run directly without producing a binary:  go run ./cmd
+make build                 # → ./youtube-updater
+# or run directly without producing a binary:  make run
+```
+
+### Development
+
+```sh
+make test        # full test suite
+make lint        # golangci-lint (v2.12.2; see .golangci.yml)
+make fmt-check   # verify gofmt formatting (non-mutating)
+make vet         # go vet
+make help        # all targets
+```
+
+`make lint` requires golangci-lint v2.12.2:
+
+```sh
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 ```
 
 ### 3. Authorize (one-time)

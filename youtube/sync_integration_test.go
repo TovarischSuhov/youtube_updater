@@ -41,10 +41,10 @@ func newHarness(t *testing.T, byChannel map[string][]youtube.Video, notFound map
 		case "/youtube/v3/channels":
 			id := r.URL.Query().Get("id")
 			if notFound[id] {
-				fmt.Fprint(w, `{"items":[]}`)
+				_, _ = fmt.Fprint(w, `{"items":[]}`)
 				return
 			}
-			fmt.Fprintf(w, `{"items":[{"id":%q,"contentDetails":{"relatedPlaylists":{"uploads":%q}}}]}`, id, "UU"+id)
+			_, _ = fmt.Fprintf(w, `{"items":[{"id":%q,"contentDetails":{"relatedPlaylists":{"uploads":%q}}}]}`, id, "UU"+id)
 		case "/youtube/v3/videos":
 			var ids []string
 			for _, v := range r.URL.Query()["id"] {
@@ -61,7 +61,7 @@ func newHarness(t *testing.T, byChannel map[string][]youtube.Video, notFound map
 					items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":"PT10M"}}`, id))
 				}
 			}
-			fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
+			_, _ = fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
 		case "/youtube/v3/playlistItems":
 			if r.Method == http.MethodGet {
 				pl := r.URL.Query().Get("playlistId")
@@ -73,7 +73,7 @@ func newHarness(t *testing.T, byChannel map[string][]youtube.Video, notFound map
 			h.mu.Lock()
 			h.inserts = append(h.inserts, parseInsertVideoID(body))
 			h.mu.Unlock()
-			fmt.Fprint(w, `{"id":"item"}`)
+			_, _ = fmt.Fprint(w, `{"id":"item"}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -93,14 +93,14 @@ func (h *harness) youTube(t *testing.T) *youtube.YouTube {
 
 func writePlaylistItems(w io.Writer, videos []youtube.Video) {
 	if len(videos) == 0 {
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 		return
 	}
 	parts := make([]string, len(videos))
 	for i, v := range videos {
 		parts[i] = fmt.Sprintf(`{"contentDetails":{"videoId":%q,"videoPublishedAt":%q}}`, v.ID, v.PublishedAt)
 	}
-	fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(parts, ","))
+	_, _ = fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(parts, ","))
 }
 
 func parseInsertVideoID(b []byte) string {

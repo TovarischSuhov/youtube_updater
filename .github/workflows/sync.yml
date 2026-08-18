@@ -61,8 +61,13 @@ jobs:
           go-version: '1.26.3'
           cache: true
 
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+
       - name: Build
-        run: go build -o youtube-updater ./cmd
+        run: make build
 
       # save fails if the key already exists (e.g. re-running the workflow on an
       # unchanged commit); that's harmless since the cached binary is identical.
@@ -109,7 +114,7 @@ jobs:
           cache: true
       - name: Build (cache miss)
         if: steps.bin.outputs.cache-hit != 'true'
-        run: go build -o youtube-updater ./cmd
+        run: make build
 
       - name: Write OAuth credentials
         run: |

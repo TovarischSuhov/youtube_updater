@@ -1,5 +1,6 @@
 // This file holds the pure (no-API) parsing of channel and playlist references
 // from a bare ID or a YouTube URL. API-side resolution of slugs lives on YouTube.
+
 package youtube
 
 import (

@@ -244,7 +244,7 @@ func (y *YouTube) isShort(ctx context.Context, id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusOK {
 		return true, nil
 	}
@@ -453,11 +453,11 @@ func authorize(ctx context.Context, config *oauth2.Config) (*oauth2.Token, error
 			return
 		}
 		codeCh <- q.Get("code")
-		fmt.Fprintln(w, "Authorization complete. You can close this tab.")
+		_, _ = fmt.Fprintln(w, "Authorization complete. You can close this tab.")
 	})
 	srv := &http.Server{Addr: ":" + port, Handler: mux}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Shutdown(ctx)
+	defer func() { _ = srv.Shutdown(ctx) }()
 
 	log.Printf("Open this URL to authorize (once):\n  %s\n", authURL)
 	select {

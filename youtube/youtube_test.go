@@ -94,12 +94,12 @@ func writeVideosList(w http.ResponseWriter, r *http.Request, durFor map[string]s
 		}
 		items = append(items, fmt.Sprintf(`{"id":%q,"contentDetails":{"duration":%q}}`, id, dur))
 	}
-	fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
+	_, _ = fmt.Fprintf(w, `{"items":[%s]}`, strings.Join(items, ","))
 }
 
 func TestResolveUploads_ReturnsUploadsPlaylistID(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"items":[{"contentDetails":{"relatedPlaylists":{"uploads":"UUabc"}}}]}`)
+		_, _ = fmt.Fprint(w, `{"items":[{"contentDetails":{"relatedPlaylists":{"uploads":"UUabc"}}}]}`)
 	})
 	got, err := yt.ResolveUploads("UCabc")
 	if err != nil {
@@ -112,7 +112,7 @@ func TestResolveUploads_ReturnsUploadsPlaylistID(t *testing.T) {
 
 func TestResolveUploads_ChannelNotFound_ReturnsError(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	})
 	if _, err := yt.ResolveUploads("UCx"); err == nil {
 		t.Fatal("expected error for channel not found")
@@ -124,10 +124,10 @@ func TestListUploads_ParsesPaginatedNewestFirst(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
 		if page == 0 {
 			page++
-			fmt.Fprint(w, `{"items":[{"contentDetails":{"videoId":"v1","videoPublishedAt":"2026-07-27T10:00:00Z"}},{"contentDetails":{"videoId":"v2","videoPublishedAt":"2026-07-27T09:00:00Z"}}],"nextPageToken":"TOKEN2"}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"contentDetails":{"videoId":"v1","videoPublishedAt":"2026-07-27T10:00:00Z"}},{"contentDetails":{"videoId":"v2","videoPublishedAt":"2026-07-27T09:00:00Z"}}],"nextPageToken":"TOKEN2"}`)
 			return
 		}
-		fmt.Fprint(w, `{"items":[{"contentDetails":{"videoId":"v3","videoPublishedAt":"2026-07-27T08:00:00Z"}}]}`)
+		_, _ = fmt.Fprint(w, `{"items":[{"contentDetails":{"videoId":"v3","videoPublishedAt":"2026-07-27T08:00:00Z"}}]}`)
 	})
 	got, err := yt.ListUploads("UUx")
 	if err != nil {
@@ -146,7 +146,7 @@ func TestListUploads_ParsesPaginatedNewestFirst(t *testing.T) {
 
 func TestListUploads_EmptyPlaylist_ReturnsEmptyNoError(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	})
 	got, err := yt.ListUploads("UUx")
 	if err != nil {
@@ -163,7 +163,7 @@ func TestAddToPlaylist_ReturnsItemID(t *testing.T) {
 			http.Error(w, "expected POST", http.StatusMethodNotAllowed)
 			return
 		}
-		fmt.Fprint(w, `{"id":"PLI1"}`)
+		_, _ = fmt.Fprint(w, `{"id":"PLI1"}`)
 	})
 	got, err := yt.AddToPlaylist("PLx", "v1")
 	if err != nil {
@@ -178,9 +178,9 @@ func TestResolveNames_ReturnsBothNames(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/youtube/v3/channels":
-			fmt.Fprint(w, `{"items":[{"snippet":{"title":"Foo Channel"}}]}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"snippet":{"title":"Foo Channel"}}]}`)
 		case "/youtube/v3/playlists":
-			fmt.Fprint(w, `{"items":[{"snippet":{"title":"My Playlist"}}]}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"snippet":{"title":"My Playlist"}}]}`)
 		}
 	})
 	chName, plName, err := yt.ResolveNames("UCa", "PLa")
@@ -199,9 +199,9 @@ func TestResolveNames_ChannelNotFound(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/youtube/v3/channels":
-			fmt.Fprint(w, `{"items":[]}`)
+			_, _ = fmt.Fprint(w, `{"items":[]}`)
 		case "/youtube/v3/playlists":
-			fmt.Fprint(w, `{"items":[{"snippet":{"title":"P"}}]}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"snippet":{"title":"P"}}]}`)
 		}
 	})
 	if _, _, err := yt.ResolveNames("UCx", "PLa"); err == nil {
@@ -213,9 +213,9 @@ func TestResolveNames_PlaylistNotFound(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/youtube/v3/channels":
-			fmt.Fprint(w, `{"items":[{"snippet":{"title":"C"}}]}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"snippet":{"title":"C"}}]}`)
 		case "/youtube/v3/playlists":
-			fmt.Fprint(w, `{"items":[]}`)
+			_, _ = fmt.Fprint(w, `{"items":[]}`)
 		}
 	})
 	if _, _, err := yt.ResolveNames("UCa", "PLx"); err == nil {
@@ -293,10 +293,10 @@ func TestResolveChannelRef_HandleResolvedViaForHandle(t *testing.T) {
 			return
 		}
 		if r.URL.Query().Get("forHandle") == "SomeHandle" {
-			fmt.Fprint(w, `{"items":[{"id":"UC_RESOLVED_FROM_HANDLE"}]}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"id":"UC_RESOLVED_FROM_HANDLE"}]}`)
 			return
 		}
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	})
 	got, err := yt.ResolveChannelRef(ChannelRef{Kind: "handle", Slug: "SomeHandle"})
 	if err != nil {
@@ -314,14 +314,14 @@ func TestResolveChannelRef_FallsBackToForUsername(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.URL.Query().Get("forHandle") != "" {
-			fmt.Fprint(w, `{"items":[]}`) // handle miss → fall back
+			_, _ = fmt.Fprint(w, `{"items":[]}`) // handle miss → fall back
 			return
 		}
 		if r.URL.Query().Get("forUsername") == "LegacyName" {
-			fmt.Fprint(w, `{"items":[{"id":"UC_FROM_USERNAME"}]}`)
+			_, _ = fmt.Fprint(w, `{"items":[{"id":"UC_FROM_USERNAME"}]}`)
 			return
 		}
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	})
 	got, err := yt.ResolveChannelRef(ChannelRef{Kind: "user", Slug: "LegacyName"})
 	if err != nil {
@@ -339,7 +339,7 @@ func TestResolveChannelRef_FallsBackToForUsername(t *testing.T) {
 // surfaces as an error.
 func TestResolveChannelRef_NotFound_ReturnsError(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	})
 	if _, err := yt.ResolveChannelRef(ChannelRef{Kind: "handle", Slug: "Ghost"}); err == nil {
 		t.Fatal("expected error for unresolved handle, got nil")
