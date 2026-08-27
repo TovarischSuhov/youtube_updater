@@ -3,7 +3,7 @@
 # Two jobs share this workflow:
 #   build — runs on every push to master, compiles the binary, and caches it
 #           keyed on the Go source hash so scheduled runs don't recompile.
-#   sync  — runs on the 30-minute schedule (and manual dispatch), restores the
+#   sync  — runs hourly 08:00–24:00 UTC (and manual dispatch), restores the
 #           cached binary, and runs it directly. On a cold/evicted cache it
 #           falls back to compiling, so sync never blocks on a missing binary.
 #
@@ -39,7 +39,7 @@ on:
       - 'go.sum'
       - '.github/workflows/sync.yml'
   schedule:
-    - cron: '7,37 * * * *' # every 30 minutes, at :07 & :37 past the hour UTC
+    - cron: '7 8-23 * * *' # hourly at :07, hours 08–23 UTC (quiet 00:00–08:00)
   workflow_dispatch: {} # manual "Run workflow" button
 
 # The default GITHUB_TOKEN must be allowed to push the state.json commit.
