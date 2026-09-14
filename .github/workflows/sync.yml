@@ -3,7 +3,7 @@
 # Two jobs share this workflow:
 #   build — runs on every push to master, compiles the binary, and caches it
 #           keyed on the Go source hash so scheduled runs don't recompile.
-#   sync  — runs hourly 08:00–24:00 UTC (and manual dispatch), restores the
+#   sync  — runs 3x/hour 08:00–24:00 UTC (and manual dispatch), restores the
 #           cached binary, and runs it directly. On a cold/evicted cache it
 #           falls back to compiling, so sync never blocks on a missing binary.
 #
@@ -39,7 +39,16 @@ on:
       - 'go.sum'
       - '.github/workflows/sync.yml'
   schedule:
-    - cron: '7 8-23 * * *' # hourly at :07, hours 08–23 UTC (quiet 00:00–08:00)
+    # 3 slots/hour at :07/:27/:47. GitHub's scheduler delays and outright DROPS
+    # scheduled runs during peak load — with one hourly slot only ~30% of slots
+    # actually ran (4–6 runs/day for 16 scheduled). Overscheduling at off-peak
+    # minutes (away from :00/:30) restores an effective ~hourly sync: the
+    # youtube-sync concurrency group keeps at most one run in flight + one
+    # pending (a newer pending replaces an older one), so slots that do land
+    # are serialized and never pile up. Cheap on purpose: 56 quota units/run
+    # × 48 = ~2.7k of the 10k/day YouTube quota, and Actions minutes are free
+    # for public repos.
+    - cron: '7-59/20 8-23 * * *' # hours 08–23 UTC (quiet 00:00–08:00)
   workflow_dispatch: {} # manual "Run workflow" button
 
 # The default GITHUB_TOKEN must be allowed to push the state.json commit.
@@ -54,15 +63,15 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26.3'
           cache: true
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
 
@@ -73,7 +82,7 @@ jobs:
       # unchanged commit); that's harmless since the cached binary is identical.
       - name: Cache binary
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: youtube-updater
           key: yt-binary-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
@@ -92,13 +101,13 @@ jobs:
     steps:
       # Full history so the `git pull --rebase` in the commit step is reliable if
       # master advanced between checkout and push.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Restore cached binary
         id: bin
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: youtube-updater
           key: yt-binary-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
@@ -108,7 +117,7 @@ jobs:
       # block a scheduled sync. Skipped entirely on a cache hit (no Go needed).
       - name: Set up Go (cache miss)
         if: steps.bin.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.26.3'
           cache: true
