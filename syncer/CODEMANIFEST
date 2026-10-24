@@ -73,10 +73,17 @@ Annotations: |
             oldest first, accumulating only the actually inserted IDs in
             AddedIDs; on an insert failure, stop the batch and record the
             failure in Err, then set the channel's last-seen cursor to the
-            newest processed `Video` — inserted plus excluded uploads up to the
-            failure point; if nothing was processed, leave the cursor untouched
-            so the whole batch is retried on the next run (an error advancing
-            the cursor must not overwrite the insert failure)
+            newest processed `Video` whose PublishedAt is strictly less than
+            the failed one's — inserted plus excluded uploads up to the
+            failure point; clamping below the failure is a deliberate
+            no-silent-loss choice: a processed timestamp newer than the
+            failure can only come from list-order inversion, parking over it
+            would make the retry skip the failed video forever, and the
+            resulting duplicate of an already-inserted inverted video is
+            visible and cleanable; if no processed `Video` is older than the
+            failure, leave the cursor untouched so the whole batch is retried
+            on the next run (an error advancing the cursor must not overwrite
+            the insert failure)
           - on full success, set the channel's last-seen cursor to the newest
             `Video` (the cursor advances past excluded uploads too, so they
             are never re-scanned)

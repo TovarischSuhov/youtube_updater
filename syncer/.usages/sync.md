@@ -20,7 +20,12 @@ they are never re-added.
 Failure semantics: AddedIDs lists only the videos actually inserted, in insertion
 order (in dry-run, the would-be list). If an insert fails mid-batch, insertion
 stops, Err carries the failure, and the watermark parks at the newest processed
-video up to the failure point (inserted plus the skipped Shorts/streams) — so the
-not-yet-inserted videos are retried on the next run without duplicates. If nothing
-was processed (the first insert failed), the cursor is left untouched. On full
-success the cursor still advances to the newest upload.
+video strictly older than the failed one (inserted plus the skipped
+Shorts/streams) — so the failed and not-yet-inserted videos are retried on the
+next run. An inverted upload newer than the failed one (newer timestamp sitting
+deeper in the list) is never parked over: re-inserting it on the retry leaves a
+visible, cleanable duplicate — the accepted price of never silently losing the
+failed video. If no processed video is older than the failure (nothing was
+processed, or every processed timestamp is newer via inversion), the cursor is
+left untouched and the whole batch is retried. On full success the cursor still
+advances to the newest upload.

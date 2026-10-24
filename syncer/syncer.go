@@ -90,8 +90,9 @@ func syncOne(yt *youtube.YouTube, st *state.State, m config.ChannelMapping, dryR
 	// Insert oldest→newest to keep playlist chronological. toAdd is
 	// newest-first (same order as ListUploads), so walk it in reverse. On an
 	// insert failure, stop: AddedIDs keeps only what actually went in, and the
-	// watermark parks at the newest processed video so the not-yet-inserted
-	// ones stay new for the next run instead of being silently dropped.
+	// watermark parks at the newest processed video strictly older than the
+	// failed one, so the failed and not-yet-inserted ones stay new for the
+	// next run instead of being silently dropped.
 	var addErr error
 	var failed youtube.Video
 	processed := make([]youtube.Video, 0, len(isNew))
@@ -135,7 +136,29 @@ func syncOne(yt *youtube.YouTube, st *state.State, m config.ChannelMapping, dryR
 	if len(processed) == 0 {
 		return r // nothing processed: leave the cursor untouched, retry the whole batch
 	}
-	park := newestOf(processed)
+	// Clamp the parking point to processed videos strictly OLDER than the
+	// failed one. Deliberate no-silent-loss trade-off: a processed timestamp
+	// newer than the failure can only come from list-order inversion (a
+	// premiere/late-published upload sitting deeper in the list). Parking over
+	// the failed video's timestamp — the raw max — would make the next run's
+	// selectNew skip it forever: an episode silently lost. Duplicates of the
+	// already-inserted inverted videos on the retry are the accepted price —
+	// they are visible in the playlist and cleanable; a lost episode is not.
+	older := make([]youtube.Video, 0, len(processed))
+	failedAt, failedErr := time.Parse(time.RFC3339, failed.PublishedAt)
+	for _, v := range processed {
+		at, err := time.Parse(time.RFC3339, v.PublishedAt)
+		if failedErr == nil && err == nil && at.Before(failedAt) {
+			older = append(older, v)
+		}
+	}
+	// Everything processed (if anything) is newer than the failure: same call
+	// as zero processed — untouched cursor, whole batch retried, possible
+	// duplicates of what did land included.
+	if len(older) == 0 {
+		return r
+	}
+	park := newestOf(older)
 	if err := st.SetLastSeen(m.ChannelID, park.ID, park.PublishedAt); err != nil {
 		// The insert failure is primary — the advance error must not overwrite it.
 		r.Err = fmt.Errorf("%w (watermark advance failed: %v)", addErr, err)

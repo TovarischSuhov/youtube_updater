@@ -391,6 +391,17 @@ func sortedEqual(got, want []string) bool {
 	return slices.Equal(g, w)
 }
 
+// countID counts how many times a video ID appears in an insert log.
+func countID(ids []string, id string) int {
+	n := 0
+	for _, x := range ids {
+		if x == id {
+			n++
+		}
+	}
+	return n
+}
+
 // TestSyncAll_PartialInsertFailure_CursorAtLastProcessed_ErrKept covers FR1:
 // when an insert fails mid-batch, insertion stops, the insert error is kept
 // (not overwritten), AddedIDs reports only what was actually inserted, and the
@@ -458,16 +469,21 @@ func TestSyncAll_PartialInsertFailure_CursorAtLastProcessed_ErrKept(t *testing.T
 	}
 }
 
-// TestSyncAll_PartialInsertFailure_NonMonotonic_WatermarkIsMax pins the MAX
-// PublishedAt semantics of the partial-failure watermark: with a non-monotonic
-// upload list the watermark must be the newest processed timestamp, not the
-// positionally last processed element. v_b (13:00) fails; processed = {v_c
-// (12:00), v_d (14:00)}; watermark = 14:00. A "last positionally processed"
-// mutant parks at 12:00; the old unconditional-newest behavior parks at
-// videos[0] = 13:00 — both fail this test.
-func TestSyncAll_PartialInsertFailure_NonMonotonic_WatermarkIsMax(t *testing.T) {
+// TestSyncAll_PartialInsertFailure_NonMonotonic_WatermarkClampedBelowFailed pins
+// the clamped partial-failure watermark: with a non-monotonic upload list the
+// watermark must park at the newest processed timestamp strictly OLDER than the
+// failed video's — never at or over it, even when another processed video
+// carries a newer timestamp via list-order inversion. v_b (13:00) fails;
+// processed = {v_c (12:00), v_d (14:00, inverted: sits deeper in the list)};
+// watermark = 12:00. Parking at the raw max (14:00) or at the list-newest
+// (v_b's own 13:00) would make the retry's selectNew skip v_b forever — a
+// silently lost episode; the retry run below proves v_b lands exactly once.
+// v_d re-inserting on the retry is the documented acceptable price: a visible
+// duplicate beats a lost episode.
+func TestSyncAll_PartialInsertFailure_NonMonotonic_WatermarkClampedBelowFailed(t *testing.T) {
 	// List order (as served, newest-first position) is NOT time-monotonic:
-	// the newest upload v_d (14:00) sits last.
+	// the newest upload v_d (14:00) sits last AND is newer than the failing
+	// v_b (13:00) that precedes it positionally.
 	vids := []youtube.Video{
 		{ID: "v_b", PublishedAt: "2026-07-27T13:00:00Z"},
 		{ID: "v_c", PublishedAt: "2026-07-27T12:00:00Z"},
@@ -476,20 +492,60 @@ func TestSyncAll_PartialInsertFailure_NonMonotonic_WatermarkIsMax(t *testing.T) 
 	h := newHarness(t, map[string][]youtube.Video{"UCa": vids}, nil, nil)
 	h.injectInsertFailures("v_b")
 	st := seededState(t, "UCa", "2026-07-27T10:00:00Z")
+	mappings := []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}
 
-	res, err := syncer.SyncAll(h.youTube(t), st, []config.ChannelMapping{{ChannelID: "UCa", PlaylistID: "PLa"}}, false)
+	// Run 1: the oldest→newest walk inserts v_d, then v_c, then fails on v_b.
+	res, err := syncer.SyncAll(h.youTube(t), st, mappings, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res[0].Err == nil || !strings.Contains(res[0].Err.Error(), "v_b") {
-		t.Errorf("Err=%v, want error mentioning v_b", res[0].Err)
+		t.Errorf("run1 Err=%v, want error mentioning v_b", res[0].Err)
 	}
-	// v_d and v_c inserted (batch walked oldest→newest), v_b failed.
-	if !sortedEqual(h.inserts, []string{"v_d", "v_c"}) {
-		t.Errorf("inserts=%v, want exactly {v_d, v_c}", h.inserts)
+	if !slices.Equal(h.inserts, []string{"v_d", "v_c"}) {
+		t.Errorf("run1 inserts=%v, want [v_d v_c] (walk order; v_b failed)", h.inserts)
 	}
-	if got := st.LastSeenAt("UCa"); got != "2026-07-27T14:00:00Z" {
-		t.Errorf("cursor=%q, want MAX processed 14:00", got)
+	// Clamp: only v_c (12:00) is processed AND strictly older than the failed
+	// v_b (13:00); the inverted v_d (14:00) must not lift the watermark over
+	// the failure point.
+	if got := st.LastSeenAt("UCa"); got != "2026-07-27T12:00:00Z" {
+		t.Errorf("run1 cursor=%q, want clamped processed 12:00 (below failed v_b's 13:00, despite inverted v_d 14:00)", got)
+	}
+
+	// Run 2 without the failure: selectNew(>12:00) re-selects v_b and the
+	// inverted v_d (v_c is done). v_b must land exactly once — the
+	// no-silent-loss guarantee the clamp exists for; v_d lands a second time,
+	// the accepted duplicate.
+	h.injectInsertFailures()
+	res2, err := syncer.SyncAll(h.youTube(t), st, mappings, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2[0].Err != nil {
+		t.Errorf("run2 Err=%v, want nil", res2[0].Err)
+	}
+	if res2[0].NewCount != 2 {
+		t.Errorf("run2 NewCount=%d, want 2 (v_b, v_d)", res2[0].NewCount)
+	}
+	if n := countID(h.inserts, "v_b"); n != 1 {
+		t.Errorf("v_b inserted %d times across runs, want exactly 1 (a miss = silently lost episode)", n)
+	}
+	if n := countID(h.inserts, "v_c"); n != 1 {
+		t.Errorf("v_c inserted %d times across runs, want exactly 1", n)
+	}
+	// The inverted v_d (14:00 > failed 13:00) stays above the clamped
+	// watermark and is inserted again — a visible duplicate, accepted price.
+	if n := countID(h.inserts, "v_d"); n != 2 {
+		t.Errorf("v_d inserted %d times across runs, want 2 (once per run — accepted duplicate)", n)
+	}
+	if !slices.Equal(res2[0].AddedIDs, []string{"v_d", "v_b"}) {
+		t.Errorf("run2 AddedIDs=%v, want [v_d v_b] (walk order; v_d re-selected above the clamp)", res2[0].AddedIDs)
+	}
+	// Full success advances positionally to the list-newest (v_b, 13:00), not
+	// the max timestamp — same positional semantics documented in
+	// TestSyncAll_FirstInsertFails_ExcludedNewerShort_CursorUntouched.
+	if got := st.LastSeenAt("UCa"); got != "2026-07-27T13:00:00Z" {
+		t.Errorf("run2 cursor=%q, want list-newest 13:00", got)
 	}
 }
 
