@@ -12,6 +12,10 @@ Construct once per run with paths only:
 
 First construction with no cached token opens a browser for one-time consent and
 writes the token to tokenPath; later constructions reuse and refresh it silently.
+The consent wait is bounded: if the one-time consent is not completed within 5
+minutes, construction fails with an error that points at the logged consent URL
+and the callback port; a callback server that cannot start (e.g. the port is
+already taken) fails promptly with the underlying error instead of blocking.
 
 ## Resolve a channel's uploads
 
@@ -19,7 +23,12 @@ writes the token to tokenPath; later constructions reuse and refresh it silently
 
 ## Enumerate uploads (newest first)
 
-    videos, err := youTube.ListUploads(uploadsID) // []youtube.Video
+    videos, err := youTube.ListUploads(uploadsID, watermark) // []youtube.Video
+
+Pass the channel's watermark (`State`'s last-seen cursor; empty for a not-yet-
+seeded channel): pagination stops once every item of a page is older than the
+watermark, and an empty watermark lists exactly one page. The watermark stop is
+not an error — the fetched pages are returned as usual.
 
 ## Keep only regular videos (drop Shorts and streams)
 

@@ -46,7 +46,8 @@ Annotations: |
     3. Construct `YouTube`(`secretsPath`, `tokenPath`, `redirectURL`)
     4. Construct `State`(`statePath`)
     5. Run `SyncAll` with the facade, state, the loaded mappings, and `dryRun`, collecting the outcomes
-    6. Unless `dryRun`, save state
+    6. Unless `dryRun`, prune cursors for channels absent from the config, then
+       save state — via `pruneAndSaveState` (an empty config clears all cursors)
     7. Log each `ChannelResult` among the outcomes
     8. Return `err` on fatal failure
 

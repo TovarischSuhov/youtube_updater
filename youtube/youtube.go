@@ -100,23 +100,48 @@ func (y *YouTube) ResolveUploads(channelID string) (string, error) {
 	return uploads, nil
 }
 
-// ListUploads enumerates a channel's uploads, newest first.
-func (y *YouTube) ListUploads(uploadsPlaylistID string) ([]Video, error) {
+// errStopPages is the sentinel the Pages callback returns to stop pagination
+// early (the watermark rule). It is deliberately NOT a *googleapi.Error, so
+// withRetry treats it as non-retryable and returns without backoff; errors.Is
+// still recognizes it through withRetry's single %w wrap, and ListUploads
+// swallows it so only real errors escape to callers.
+var errStopPages = errors.New("youtube: stop pagination (watermark reached)")
+
+// ListUploads enumerates a channel's uploads, newest first. watermark is the
+// channel's publish-time cursor: pagination stops once EVERY item of the
+// current page is older than it (whole-page rule — a safeguard against
+// premieres/late publishings whose date postdates their list position), and an
+// empty watermark (unseeded channel) lists exactly one page, since seeding
+// only needs the newest upload.
+func (y *YouTube) ListUploads(uploadsPlaylistID, watermark string) ([]Video, error) {
+	mark, _ := time.Parse(time.RFC3339, watermark) // zero time for junk; empty handled below
 	var videos []Video
 	err := withRetry("list uploads", func() error {
 		call := y.svc.PlaylistItems.List([]string{"snippet", "contentDetails"}).
 			PlaylistId(uploadsPlaylistID).MaxResults(50)
 		return call.Pages(context.Background(), func(resp *youtubev3.PlaylistItemListResponse) error {
+			allOld := true
 			for _, it := range resp.Items {
 				vid := it.ContentDetails.VideoId
 				if vid == "" {
 					continue // playlist items may be non-video (e.g. deleted)
 				}
 				videos = append(videos, Video{ID: vid, PublishedAt: it.ContentDetails.VideoPublishedAt})
+				if t, err := time.Parse(time.RFC3339, it.ContentDetails.VideoPublishedAt); err == nil && t.After(mark) {
+					allOld = false
+				}
+			}
+			// Unseeded channel (empty watermark): one page is enough — seeding
+			// only needs the newest upload. Seeded: stop once the whole page is old.
+			if watermark == "" || allOld {
+				return errStopPages
 			}
 			return nil
 		})
 	})
+	if errors.Is(err, errStopPages) {
+		err = nil // the stop is not a failure
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -430,8 +455,15 @@ func tokenFor(ctx context.Context, config *oauth2.Config, tokenPath string) (*oa
 	return tok, nil
 }
 
+// consentTimeout bounds how long authorize waits for the user to complete the
+// OAuth consent in their browser; after it, authorize fails with an actionable
+// error instead of blocking forever.
+var consentTimeout = 5 * time.Minute
+
 // authorize runs the consent flow on a local callback server and exchanges the
 // returned code for a token. AccessTypeOffline ensures a refresh token is granted.
+// It fails promptly if the callback server cannot start (e.g. the port is busy)
+// and after consentTimeout if no consent arrives.
 func authorize(ctx context.Context, config *oauth2.Config) (*oauth2.Token, error) {
 	port := portFromRedirect(config.RedirectURL)
 	state := randomState()
@@ -439,25 +471,54 @@ func authorize(ctx context.Context, config *oauth2.Config) (*oauth2.Token, error
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
+	srvErrCh := make(chan error, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if e := q.Get("error"); e != "" {
-			errCh <- fmt.Errorf("oauth: %s", e)
+			select {
+			case errCh <- fmt.Errorf("oauth: %s", e):
+			default:
+			}
 			http.Error(w, e, http.StatusBadRequest)
 			return
 		}
 		if q.Get("state") != state {
-			errCh <- errors.New("oauth: state mismatch")
+			select {
+			case errCh <- errors.New("oauth: state mismatch"):
+			default:
+			}
 			http.Error(w, "state mismatch", http.StatusBadRequest)
 			return
 		}
-		codeCh <- q.Get("code")
+		select {
+		case codeCh <- q.Get("code"):
+		default:
+		}
 		_, _ = fmt.Fprintln(w, "Authorization complete. You can close this tab.")
 	})
 	srv := &http.Server{Addr: ":" + port, Handler: mux}
-	go func() { _ = srv.ListenAndServe() }()
-	defer func() { _ = srv.Shutdown(ctx) }()
+	// A failed ListenAndServe (e.g. the callback port is already taken) must
+	// reach the caller promptly, not be swallowed while authorize waits for a
+	// consent that can never arrive. http.ErrServerClosed is the normal exit
+	// via the deferred Shutdown — not an error. Sends are non-blocking: once
+	// authorize has returned via another case, a late error must not wedge the
+	// goroutine (Shutdown waits for active handlers to finish).
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			select {
+			case srvErrCh <- err:
+			default:
+			}
+		}
+	}()
+	// Bounded shutdown: a wedged handler (never now that sends are
+	// non-blocking, but defensively) must not hang authorize forever.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
 
 	log.Printf("Open this URL to authorize (once):\n  %s\n", authURL)
 	select {
@@ -465,6 +526,10 @@ func authorize(ctx context.Context, config *oauth2.Config) (*oauth2.Token, error
 		return config.Exchange(ctx, code)
 	case err := <-errCh:
 		return nil, err
+	case err := <-srvErrCh:
+		return nil, fmt.Errorf("youtube: oauth callback server: %w", err)
+	case <-time.After(consentTimeout):
+		return nil, fmt.Errorf("youtube: oauth consent timed out after %v: no authorization code arrived; open the logged URL in a browser, check that port %s is free, then rerun", consentTimeout, port)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

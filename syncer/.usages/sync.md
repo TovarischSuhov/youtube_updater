@@ -16,3 +16,11 @@ added), NewCount, AddedIDs, and Err (set if that channel failed; other channels 
 still processed). NewCount and AddedIDs count only regular long-form videos:
 Shorts and live streams are skipped, and the watermark still advances past them so
 they are never re-added.
+
+Failure semantics: AddedIDs lists only the videos actually inserted, in insertion
+order (in dry-run, the would-be list). If an insert fails mid-batch, insertion
+stops, Err carries the failure, and the watermark parks at the newest processed
+video up to the failure point (inserted plus the skipped Shorts/streams) — so the
+not-yet-inserted videos are retried on the next run without duplicates. If nothing
+was processed (the first insert failed), the cursor is left untouched. On full
+success the cursor still advances to the newest upload.

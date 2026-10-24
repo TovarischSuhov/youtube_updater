@@ -32,9 +32,11 @@ Annotations: |
     "NewCount -> int": |
       Number of new videos detected for the channel.
     "AddedIDs -> []string": |
-      Identifiers of videos inserted this run.
+      Identifiers of videos actually inserted this run, in insertion order; in
+      dry-run, the identifiers that would be inserted.
     "Err -> error": |
-      Error encountered for this channel, if any.
+      Error encountered for this channel, if any; an insert failure is kept and
+      never overwritten by a cursor-advance failure.
 
 "SyncAll(youTube: YouTube, state: State, mappings: []ChannelMapping, dryRun: bool) -> results:[]ChannelResult, err:error":
   location: syncer.go
@@ -51,7 +53,10 @@ Annotations: |
     Algorithm:
     1. For each `ChannelMapping` in `mappings`:
        1. Resolve the channel's uploads playlist via `YouTube`
-       2. Enumerate uploads (newest first) as `Video` items via `YouTube`
+       2. Enumerate uploads (newest first) as `Video` items via `YouTube`,
+          passing the channel's watermark from `State` so listing stops past it
+          (an unseeded channel has an empty watermark and gets the newest page
+          only)
        3. If the enumerated list is empty, record a `ChannelResult` with NewCount 0
           and continue to the next mapping without setting a cursor
        4. If the channel is not seeded in `State`:
@@ -62,9 +67,18 @@ Annotations: |
           - select `Video` items whose PublishedAt is greater than the watermark
           - drop Shorts and live streams via `YouTube` (FilterRegularVideos), keeping
             only regular long-form uploads
-          - unless `dryRun`, insert each kept `Video` into the playlist via
-            `YouTube`, oldest first, then set the channel's last-seen cursor to the
-            newest `Video` (the cursor advances past excluded uploads too, so they
+          - if `dryRun`, report the kept identifiers as AddedIDs and mutate no
+            state
+          - otherwise, insert each kept `Video` into the playlist via `YouTube`,
+            oldest first, accumulating only the actually inserted IDs in
+            AddedIDs; on an insert failure, stop the batch and record the
+            failure in Err, then set the channel's last-seen cursor to the
+            newest processed `Video` — inserted plus excluded uploads up to the
+            failure point; if nothing was processed, leave the cursor untouched
+            so the whole batch is retried on the next run (an error advancing
+            the cursor must not overwrite the insert failure)
+          - on full success, set the channel's last-seen cursor to the newest
+            `Video` (the cursor advances past excluded uploads too, so they
             are never re-scanned)
           - build a `ChannelResult` with NewCount and the added identifiers
     2. Return `results`

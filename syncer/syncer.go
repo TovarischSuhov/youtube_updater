@@ -40,7 +40,7 @@ func syncOne(yt *youtube.YouTube, st *state.State, m config.ChannelMapping, dryR
 		r.Err = fmt.Errorf("channel %s: %w", m.ChannelID, err)
 		return r
 	}
-	videos, err := yt.ListUploads(uploadsID)
+	videos, err := yt.ListUploads(uploadsID, st.LastSeenAt(m.ChannelID))
 	if err != nil {
 		r.Err = fmt.Errorf("uploads %s: %w", m.ChannelID, err)
 		return r
@@ -77,22 +77,88 @@ func syncOne(yt *youtube.YouTube, st *state.State, m config.ChannelMapping, dryR
 		return r
 	}
 	r.NewCount = len(toAdd)
-	r.AddedIDs = idsOf(toAdd)
+	if dryRun {
+		r.AddedIDs = idsOf(toAdd)
+		return r
+	}
 
-	if !dryRun {
-		// Insert oldest→newest to keep playlist chronological. toAdd is
-		// newest-first (same order as ListUploads), so walk it in reverse.
-		for _, v := range slices.Backward(toAdd) {
-			if _, err := yt.AddToPlaylist(m.PlaylistID, v.ID); err != nil {
-				r.Err = fmt.Errorf("add %s/%s: %w", m.ChannelID, v.ID, err)
-				break
-			}
+	kept := make(map[string]bool, len(toAdd))
+	for _, v := range toAdd {
+		kept[v.ID] = true
+	}
+
+	// Insert oldest→newest to keep playlist chronological. toAdd is
+	// newest-first (same order as ListUploads), so walk it in reverse. On an
+	// insert failure, stop: AddedIDs keeps only what actually went in, and the
+	// watermark parks at the newest processed video so the not-yet-inserted
+	// ones stay new for the next run instead of being silently dropped.
+	var addErr error
+	var failed youtube.Video
+	processed := make([]youtube.Video, 0, len(isNew))
+	for _, v := range slices.Backward(toAdd) {
+		if _, err := yt.AddToPlaylist(m.PlaylistID, v.ID); err != nil {
+			addErr = fmt.Errorf("add %s/%s: %w", m.ChannelID, v.ID, err)
+			failed = v
+			break
 		}
+		r.AddedIDs = append(r.AddedIDs, v.ID)
+		processed = append(processed, v)
+	}
+	if addErr == nil {
+		// Full success (including a batch of only Shorts/streams): advance to
+		// the newest upload.
 		if err := st.SetLastSeen(m.ChannelID, newest.ID, newest.PublishedAt); err != nil {
 			r.Err = fmt.Errorf("advance %s: %w", m.ChannelID, err)
 		}
+		return r
+	}
+	r.Err = addErr
+	// Shorts/streams count as processed only if the walk had already passed
+	// them: positionally AFTER the failed video in isNew (the walk runs from
+	// the list's end toward its front). Excluded uploads before it were never
+	// reached and must not pull the watermark past the failure point, or
+	// regular videos newer than it would be lost silently.
+	cut := slices.IndexFunc(isNew, func(v youtube.Video) bool { return v.ID == failed.ID })
+	if cut < 0 {
+		cut = len(isNew) // defensive: the failed ID is always in isNew
+	}
+	// Augment only when the walk had at least one successful insert: with zero
+	// successes there is nothing parked over, and excluded videos alone could
+	// pull the watermark past regular videos that were never attempted.
+	if len(processed) > 0 {
+		for i, v := range isNew {
+			if i > cut && !kept[v.ID] {
+				processed = append(processed, v)
+			}
+		}
+	}
+	if len(processed) == 0 {
+		return r // nothing processed: leave the cursor untouched, retry the whole batch
+	}
+	park := newestOf(processed)
+	if err := st.SetLastSeen(m.ChannelID, park.ID, park.PublishedAt); err != nil {
+		// The insert failure is primary — the advance error must not overwrite it.
+		r.Err = fmt.Errorf("%w (watermark advance failed: %v)", addErr, err)
 	}
 	return r
+}
+
+// newestOf returns the video with the maximum PublishedAt (RFC3339). Callers
+// pass selectNew output, so timestamps parse; defensively, an unparseable
+// timestamp loses to any parseable one.
+func newestOf(vs []youtube.Video) youtube.Video {
+	best := vs[0]
+	bestAt, _ := time.Parse(time.RFC3339, best.PublishedAt)
+	for _, v := range vs[1:] {
+		at, err := time.Parse(time.RFC3339, v.PublishedAt)
+		if err != nil {
+			continue
+		}
+		if bestAt.IsZero() || at.After(bestAt) {
+			best, bestAt = v, at
+		}
+	}
+	return best
 }
 
 // selectNew returns the subset of videos whose publish time is strictly after the

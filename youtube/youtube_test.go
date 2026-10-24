@@ -1,12 +1,17 @@
 package youtube
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +28,7 @@ func TestContractSurface(t *testing.T) {
 	var _ func(string, string, string) (*YouTube, error) = NewYouTube
 	var y YouTube
 	var _ func(string) (string, error) = y.ResolveUploads
-	var _ func(string) ([]Video, error) = y.ListUploads
+	var _ func(string, string) ([]Video, error) = y.ListUploads // uploadsID + watermark
 	var _ func([]Video) ([]Video, error) = y.FilterRegularVideos
 	var _ func(string, string) (string, error) = y.AddToPlaylist
 	var _ func(string, string) (string, string, error) = y.ResolveNames
@@ -129,7 +134,9 @@ func TestListUploads_ParsesPaginatedNewestFirst(t *testing.T) {
 		}
 		_, _ = fmt.Fprint(w, `{"items":[{"contentDetails":{"videoId":"v3","videoPublishedAt":"2026-07-27T08:00:00Z"}}]}`)
 	})
-	got, err := yt.ListUploads("UUx")
+	// The watermark predates every item, so no page is all-old and the listing
+	// walks the whole (two-page) history — the parse/ordering behavior under test.
+	got, err := yt.ListUploads("UUx", "2026-07-27T00:00:00Z")
 	if err != nil {
 		t.Fatalf("ListUploads error: %v", err)
 	}
@@ -148,12 +155,113 @@ func TestListUploads_EmptyPlaylist_ReturnsEmptyNoError(t *testing.T) {
 	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	})
-	got, err := yt.ListUploads("UUx")
+	got, err := yt.ListUploads("UUx", "")
 	if err != nil {
 		t.Fatalf("ListUploads error: %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("expected empty, got %d", len(got))
+	}
+}
+
+// pagedUploads builds a facade whose playlistItems.list serves pages[i] on the
+// i-th request (all but the last page carry a nextPageToken) and counts page
+// requests, so a test can pin exactly how much of the history a listing touched.
+func pagedUploads(t *testing.T, pages ...[]Video) (*YouTube, *int) {
+	t.Helper()
+	hits := 0
+	yt := newTestYouTube(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/youtube/v3/playlistItems" {
+			http.NotFound(w, r)
+			return
+		}
+		i := hits
+		hits++
+		if i >= len(pages) {
+			i = len(pages) - 1 // defensive: the assertions below pin the exact count
+		}
+		var parts []string
+		for _, v := range pages[i] {
+			parts = append(parts, fmt.Sprintf(`{"contentDetails":{"videoId":%q,"videoPublishedAt":%q}}`, v.ID, v.PublishedAt))
+		}
+		body := `{"items":[` + strings.Join(parts, ",") + `]`
+		if i < len(pages)-1 {
+			body += `,"nextPageToken":"next"`
+		}
+		_, _ = fmt.Fprint(w, body+"}")
+	})
+	return yt, &hits
+}
+
+// TestListUploads_AllOldPage_StopsPagination pins the FR2 early exit: when EVERY
+// item of the current page is older than the watermark, the listing must not
+// request the next page (which would burn quota on years of history) — and must
+// return the fetched page's items without an error (the stop is not a failure).
+func TestListUploads_AllOldPage_StopsPagination(t *testing.T) {
+	yt, hits := pagedUploads(t,
+		[]Video{
+			{ID: "old1", PublishedAt: "2026-07-27T09:00:00Z"},
+			{ID: "old2", PublishedAt: "2026-07-27T08:00:00Z"},
+		},
+		[]Video{{ID: "never", PublishedAt: "2026-07-27T07:00:00Z"}}, // must stay unfetched
+	)
+	got, err := yt.ListUploads("UUx", "2026-07-27T10:00:00Z")
+	if err != nil {
+		t.Fatalf("ListUploads error: %v (an early stop must not surface as an error)", err)
+	}
+	if *hits != 1 {
+		t.Errorf("page fetches=%d, want 1 (all page-1 items older than the watermark ⇒ stop)", *hits)
+	}
+	if len(got) != 2 || got[0].ID != "old1" || got[1].ID != "old2" {
+		t.Errorf("got %+v, want the two page-1 items", got)
+	}
+}
+
+// TestListUploads_MixedPage_ContinuesPagination pins the safeguard against
+// premieres/late publishings whose date may sit later than their list position:
+// a page holding ANY item newer than the watermark must keep the pagination
+// going into the next page, not stop on the first old element.
+func TestListUploads_MixedPage_ContinuesPagination(t *testing.T) {
+	yt, hits := pagedUploads(t,
+		[]Video{
+			{ID: "new", PublishedAt: "2026-07-27T11:00:00Z"},
+			{ID: "old", PublishedAt: "2026-07-27T09:00:00Z"},
+		},
+		[]Video{{ID: "paged", PublishedAt: "2026-07-27T08:00:00Z"}},
+	)
+	got, err := yt.ListUploads("UUx", "2026-07-27T10:00:00Z")
+	if err != nil {
+		t.Fatalf("ListUploads error: %v", err)
+	}
+	if *hits != 2 {
+		t.Errorf("page fetches=%d, want 2 (a mixed page must not stop the listing)", *hits)
+	}
+	if len(got) != 3 || got[2].ID != "paged" {
+		t.Errorf("got %+v, want all three items including page 2's", got)
+	}
+}
+
+// TestListUploads_EmptyWatermark_ListsOnePage pins the unseeded-channel rule: a
+// channel with no cursor yet only needs the newest upload for seeding, so an
+// empty watermark lists exactly one page regardless of history depth.
+func TestListUploads_EmptyWatermark_ListsOnePage(t *testing.T) {
+	yt, hits := pagedUploads(t,
+		[]Video{
+			{ID: "newest", PublishedAt: "2026-07-27T11:00:00Z"},
+			{ID: "second", PublishedAt: "2026-07-27T10:00:00Z"},
+		},
+		[]Video{{ID: "p2", PublishedAt: "2026-07-27T09:00:00Z"}},
+		[]Video{{ID: "p3", PublishedAt: "2026-07-27T08:00:00Z"}},
+	)
+	got, err := yt.ListUploads("UUx", "")
+	if err != nil {
+		t.Fatalf("ListUploads error: %v", err)
+	}
+	if *hits != 1 {
+		t.Errorf("page fetches=%d, want 1 (an unseeded channel needs only the newest)", *hits)
+	}
+	if len(got) != 2 || got[0].ID != "newest" {
+		t.Errorf("got %+v, want the first page only", got)
 	}
 }
 
@@ -626,4 +734,252 @@ func TestFilterRegularVideos_EmptyInput_NoServerHit(t *testing.T) {
 	if called {
 		t.Error("API was hit for empty input")
 	}
+}
+
+// --- FR3: OAuth consent robustness (S2) ---
+
+// authResult carries one authorize outcome out of its goroutine.
+type authResult struct {
+	tok *oauth2.Token
+	err error
+}
+
+// startAuthorize runs authorize in the background so a test can interact with
+// the callback server (or just bound the wait) while it is pending.
+func startAuthorize(ctx context.Context, config *oauth2.Config) <-chan authResult {
+	ch := make(chan authResult, 1)
+	go func() {
+		tok, err := authorize(ctx, config)
+		ch <- authResult{tok, err}
+	}()
+	return ch
+}
+
+// waitAuthorize collects the authorize result but never hangs: authorize
+// already bounds its own wait (consentTimeout, callback-server error
+// propagation, ctx cancellation), so this cap is the second line of defense —
+// a regression there must not stall the whole package run against go test's
+// 10-minute deadline.
+func waitAuthorize(t *testing.T, ch <-chan authResult, wait time.Duration) (*oauth2.Token, error) {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r.tok, r.err
+	case <-time.After(wait):
+		t.Fatalf("authorize still pending after %v (want its own consentTimeout / server-error / ctx path to fire first)", wait)
+		return nil, nil
+	}
+}
+
+// muteLog redirects the standard logger into a buffer for the duration of the
+// test (authorize logs the consent URL to stderr) and restores it on cleanup.
+func muteLog(t *testing.T) *lockedBuffer {
+	t.Helper()
+	buf := &lockedBuffer{}
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return buf
+}
+
+// lockedBuffer is a concurrency-safe bytes.Buffer: authorize writes the consent
+// URL into it via log.Printf from its own goroutine while the test goroutine
+// polls the content — a plain bytes.Buffer would race (and detonate under -race).
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.buf.Write(p)
+}
+
+func (lb *lockedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.buf.String()
+}
+
+// reservePort binds :0 (wildcard) and either keeps the listener alive (busy case)
+// or hands back a port that was free at that moment (free case: caller closes
+// first). Wildcard binds conflict with authorize's ":"+port wildcard bind.
+func reservePort(t *testing.T) (*net.TCPListener, int) {
+	t.Helper()
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	return l.(*net.TCPListener), l.Addr().(*net.TCPAddr).Port
+}
+
+// dummyConfig builds an oauth2.Config whose endpoints are never contacted
+// (Exchange is unreachable in the busy-port and timeout scenarios).
+func dummyConfig(port int) *oauth2.Config {
+	return &oauth2.Config{
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+		RedirectURL: fmt.Sprintf("http://localhost:%d", port),
+	}
+}
+
+// setConsentTimeout swaps consentTimeout for the test and restores it on cleanup.
+func setConsentTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := consentTimeout
+	consentTimeout = d
+	t.Cleanup(func() { consentTimeout = old })
+}
+
+// TestAuthorize_BusyPort_ReturnsErrorPromptly (FR3): when the local callback
+// port is already taken, ListenAndServe fails; authorize must surface that
+// failure as an error promptly instead of swallowing the server error and
+// blocking forever for a consent that can never arrive. The elapsed bound is
+// intentionally stricter than the 3s consentTimeout: a correct implementation
+// fails in milliseconds via errCh, while a timeout-only fallback would take ~3s.
+func TestAuthorize_BusyPort_ReturnsErrorPromptly(t *testing.T) {
+	l, port := reservePort(t) // kept open: the port stays busy for the whole test
+	defer func() { _ = l.Close() }()
+
+	muteLog(t)
+	setConsentTimeout(t, 3*time.Second)
+
+	config := dummyConfig(port)
+	start := time.Now()
+	tok, err := waitAuthorize(t, startAuthorize(context.Background(), config), 10*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("authorize returned token %+v, want an error for the busy callback port %d", tok, port)
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("authorize took %v to fail on a busy port, want < 2s (server error must propagate, not wait out consentTimeout)", elapsed)
+	}
+}
+
+// TestAuthorize_Timeout_ReturnsClearError (FR3): when nobody completes the
+// consent, authorize must give up after ~consentTimeout with an error that says
+// what happened and what to do next (open the logged URL, check the port,
+// restart) — not block forever. Elapsed bound is wide against flake: 50ms
+// threshold must fire well under 5s.
+func TestAuthorize_Timeout_ReturnsClearError(t *testing.T) {
+	l, port := reservePort(t)
+	_ = l.Close() // port is free for authorize's callback server now
+
+	muteLog(t)
+	setConsentTimeout(t, 50*time.Millisecond)
+
+	config := dummyConfig(port)
+	start := time.Now()
+	_, err := waitAuthorize(t, startAuthorize(context.Background(), config), 10*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("authorize returned no error, want a consent-timeout error")
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("authorize took %v, want the 50ms consentTimeout to fire well before 5s", elapsed)
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "timed out") {
+		t.Errorf("error %q does not say the consent wait timed out (want substring %q)", err, "timed out")
+	}
+	// The message must carry an action hint per FR3: open the logged URL/link
+	// or check the port. A bare "timed out" is not enough for the user to
+	// recover; the exact wording stays free (requirement, not phrasing).
+	hint := false
+	for _, kw := range []string{"url", "port", "link"} {
+		if strings.Contains(msg, kw) {
+			hint = true
+			break
+		}
+	}
+	if !hint {
+		t.Errorf("error %q gives no action hint (want it to mention the logged URL/link or the port to free)", err)
+	}
+}
+
+// TestAuthorize_ConsentCallback_ReturnsToken is the happy-path regression net
+// for the select/goroutine refactor: the authorization URL is still logged, a
+// callback with the right state and a code exchanges to a token without error.
+func TestAuthorize_ConsentCallback_ReturnsToken(t *testing.T) {
+	tokenTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Content-Type matters: oauth2 parses text/plain (the sniffed default)
+		// as a query string, not JSON.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":"t","token_type":"Bearer","expiry":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	defer tokenTS.Close()
+
+	l, port := reservePort(t)
+	_ = l.Close()
+	logBuf := muteLog(t) // capture: the consent URL must still be logged
+
+	config := &oauth2.Config{
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: tokenTS.URL,
+		},
+		RedirectURL: fmt.Sprintf("http://localhost:%d", port),
+	}
+
+	ch := startAuthorize(context.Background(), config)
+
+	authURL, err := loggedAuthURL(logBuf, 5*time.Second)
+	if err != nil {
+		t.Fatalf("authorization URL not logged: %v", err)
+	}
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatalf("parse logged auth URL %q: %v", authURL, err)
+	}
+	state := u.Query().Get("state")
+	if state == "" {
+		t.Fatalf("logged auth URL %q carries no state parameter", authURL)
+	}
+
+	// Complete the consent the way the browser would; retry while the callback
+	// server is still coming up.
+	var resp *http.Response
+	for i := 0; i < 100; i++ {
+		resp, err = http.Get(fmt.Sprintf("http://localhost:%d/?state=%s&code=test-code", port, url.QueryEscape(state)))
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("callback GET failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("callback status = %d, want 200", resp.StatusCode)
+	}
+
+	tok, err := waitAuthorize(t, ch, 10*time.Second)
+	if err != nil {
+		t.Fatalf("authorize error: %v", err)
+	}
+	if tok == nil || tok.AccessToken != "t" {
+		t.Errorf("token = %+v, want access_token %q", tok, "t")
+	}
+}
+
+// loggedAuthURL polls buf until the "Open this URL" line shows up and returns
+// the authorization URL logged by authorize.
+func loggedAuthURL(buf *lockedBuffer, within time.Duration) (string, error) {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		for _, f := range strings.Fields(buf.String()) {
+			if strings.HasPrefix(f, "http://") || strings.HasPrefix(f, "https://") {
+				return f, nil
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return "", fmt.Errorf("no URL logged within %v (buffer: %q)", within, buf.String())
 }

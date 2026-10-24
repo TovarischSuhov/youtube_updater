@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -22,6 +23,7 @@ func TestContractSurface(t *testing.T) {
 	var _ func(string, string) error = RunRemove
 	var _ func(string) error = RunList
 	var _ func(string, string) error = RunStatus
+	var _ func(*state.State, []config.ChannelMapping) error = pruneAndSaveState // unexported helper, signature pinned
 }
 
 func TestSetupLogging_AcceptsKnownLevels(t *testing.T) {
@@ -244,6 +246,143 @@ func TestRunStatus_MissingState_AllUnseeded(t *testing.T) {
 	}
 	if strings.Contains(out, "true") {
 		t.Errorf("missing state should have no seeded channels; got:\n%s", out)
+	}
+}
+
+func TestPruneAndSaveState_RemovesStaleAndPersists(t *testing.T) {
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	var logBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cursors := map[string][2]string{
+		"UCa":     {"v-a", "2026-08-01T10:00:00Z"},
+		"UCb":     {"v-b", "2026-08-02T11:00:00Z"},
+		"UCstale": {"v-old", "2026-07-01T09:00:00Z"},
+	}
+	st, err := state.NewState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ch, vv := range cursors {
+		if err := st.SetLastSeen(ch, vv[0], vv[1]); err != nil {
+			t.Fatalf("SetLastSeen(%s) error: %v", ch, err)
+		}
+	}
+	if err := st.Save(); err != nil {
+		t.Fatalf("seed Save error: %v", err)
+	}
+
+	configPath := writeConfig(t, []config.ChannelMapping{
+		{ChannelID: "UCa", PlaylistID: "PLa"},
+		{ChannelID: "UCb", PlaylistID: "PLb"},
+	})
+	mappings, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+
+	// Fresh handle from disk, mirroring how Run loads state before saving.
+	st, err = state.NewState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneAndSaveState(st, mappings); err != nil {
+		t.Fatalf("pruneAndSaveState error: %v", err)
+	}
+
+	// Reload from disk: the helper must have persisted the pruned state.
+	after, err := state.NewState(statePath)
+	if err != nil {
+		t.Fatalf("reload error: %v", err)
+	}
+	if after.IsSeeded("UCstale") || after.LastSeenID("UCstale") != "" {
+		t.Errorf("stale cursor survived on disk: seeded=%t id=%q",
+			after.IsSeeded("UCstale"), after.LastSeenID("UCstale"))
+	}
+	for ch, vv := range cursors {
+		if ch == "UCstale" {
+			continue
+		}
+		if !after.IsSeeded(ch) || after.LastSeenID(ch) != vv[0] || after.LastSeenAt(ch) != vv[1] {
+			t.Errorf("kept cursor %s damaged on disk: seeded=%t id=%q at=%q, want id=%q at=%q",
+				ch, after.IsSeeded(ch), after.LastSeenID(ch), after.LastSeenAt(ch), vv[0], vv[1])
+		}
+	}
+	if !strings.Contains(logBuf.String(), "pruned stale cursors") {
+		t.Errorf("expected a %q log line, got:\n%s", "pruned stale cursors", logBuf.String())
+	}
+}
+
+func TestPruneAndSaveState_EmptyMappings_ClearsState(t *testing.T) {
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, err := state.NewState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetLastSeen("UCa", "v-a", "2026-08-01T10:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatalf("seed Save error: %v", err)
+	}
+
+	configPath := writeConfig(t, nil) // empty config: no configured channels
+	mappings, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	if len(mappings) != 0 {
+		t.Fatalf("test setup: expected empty config, got %d pairs", len(mappings))
+	}
+
+	st, err = state.NewState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneAndSaveState(st, mappings); err != nil {
+		t.Fatalf("pruneAndSaveState error: %v", err)
+	}
+
+	after, err := state.NewState(statePath)
+	if err != nil {
+		t.Fatalf("reload error: %v", err)
+	}
+	if after.IsSeeded("UCa") {
+		t.Error("empty config must clear cursors: UCa still seeded")
+	}
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk map[string]any
+	if err := json.Unmarshal(b, &onDisk); err != nil {
+		t.Fatalf("state file after prune is not valid JSON: %v", err)
+	}
+	if len(onDisk) != 0 {
+		t.Errorf("expected an empty state file, got %d entries: %s", len(onDisk), b)
+	}
+}
+
+func TestPruneAndSaveState_SaveErrorPropagates(t *testing.T) {
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// The state file's parent directory does not exist, so Save cannot write.
+	// The helper must surface the error — swallowing it would silently skip
+	// persistence and replay the old watermark on the next run.
+	st, err := state.NewState(filepath.Join(t.TempDir(), "no-such-dir", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneAndSaveState(st, nil); err == nil {
+		t.Fatal("expected an error when Save cannot write the state file, got nil")
 	}
 }
 

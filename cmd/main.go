@@ -53,7 +53,8 @@ func EnsureConfig(configPath string) (bool, error) {
 }
 
 // Run executes one sync pass end to end: load config, build the YouTube facade and
-// state, run the sync, persist state (unless dryRun), and log per-channel results.
+// state, run the sync, prune stale cursors and persist state (unless dryRun),
+// and log per-channel results.
 func Run(configPath, secretsPath, tokenPath, statePath, redirectURL string, dryRun bool) error {
 	logger := slog.Default()
 
@@ -98,9 +99,25 @@ func Run(configPath, secretsPath, tokenPath, statePath, redirectURL string, dryR
 		return fmt.Errorf("sync: %w", syncErr)
 	}
 	if !dryRun {
-		if err := st.Save(); err != nil {
-			return fmt.Errorf("save state: %w", err)
+		if err := pruneAndSaveState(st, mappings); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// pruneAndSaveState drops cursors for channels no longer present in the config
+// (an empty config clears all cursors) and persists the state.
+func pruneAndSaveState(st *state.State, mappings []config.ChannelMapping) error {
+	ids := make([]string, 0, len(mappings))
+	for _, m := range mappings {
+		ids = append(ids, m.ChannelID)
+	}
+	if removed := st.PruneExcept(ids); removed > 0 {
+		slog.Default().Info("pruned stale cursors")
+	}
+	if err := st.Save(); err != nil {
+		return fmt.Errorf("save state: %w", err)
 	}
 	return nil
 }

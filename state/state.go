@@ -82,6 +82,24 @@ func (s *State) SetLastSeen(channelID, videoID, publishedAt string) error {
 	return nil
 }
 
+// PruneExcept removes every cursor whose channelID is not in channelIDs and
+// returns the number of cursors removed. An empty channelIDs removes all
+// cursors. Kept cursors are left intact; the change is in-memory until Save.
+func (s *State) PruneExcept(channelIDs []string) int {
+	keep := make(map[string]struct{}, len(channelIDs))
+	for _, id := range channelIDs {
+		keep[id] = struct{}{}
+	}
+	removed := 0
+	for id := range s.channels {
+		if _, ok := keep[id]; !ok {
+			delete(s.channels, id)
+			removed++
+		}
+	}
+	return removed
+}
+
 // Save persists all cursors to the state file atomically: a crash or concurrent
 // reader never observes a partially-written file.
 func (s *State) Save() error {

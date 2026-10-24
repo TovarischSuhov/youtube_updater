@@ -61,6 +61,19 @@ Annotations: |
       Algorithm:
       1. Store `videoID` and `publishedAt` for `channelID`
       2. Mark the channel seeded
+    "PruneExcept(channelIDs: []string) -> removed:int": |
+      Drop every cursor whose channel is absent from `channelIDs`.
+
+      `channelIDs`: the channel identifiers to keep
+      `removed`: number of cursors deleted
+
+      Algorithm:
+      1. Remove all cursors whose channel ID is not in `channelIDs`
+      2. An empty `channelIDs` removes every cursor
+      3. Kept cursors are left intact
+
+      Requirements:
+      - In-memory operation; run Save to persist the pruned store
     "Save() -> err:error": |
       Persist all cursors to the state file atomically.
 
